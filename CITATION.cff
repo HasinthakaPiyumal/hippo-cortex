@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "HippoCortex: Biologically-Inspired Continual Learning for Edge Robotics via Sharp Wave Ripple Generative Replay in State Space Models"
+type: software
+authors:
+  - family-names: Piyumal
+    given-names: Hasinthaka
+    affiliation: University of Kelaniya
+    email: senanay-se21036@stu.kln.ac.lk
+  - family-names: Dedigama
+    given-names: Praveen
+    affiliation: University of Kelaniya
+    email: dedigam-se21031@stu.kln.ac.lk
+  - family-names: Mihisara
+    given-names: Induwara
+    affiliation: University of Kelaniya
+    email: mihisar-se21025@stu.kln.ac.lk
+  - family-names: Kavindi
+    given-names: Thagya
+    affiliation: University of Kelaniya
+    email: kavindi-se21062@stu.kln.ac.lk
+contact:
+  - family-names: Warnajith
+    given-names: Nalin
+    name-prefix: Dr.
+    affiliation: University of Kelaniya
+    email: nwarnajith@kln.ac.lk
+    role: supervisor
+year: 2026
+keywords:
+  - continual-learning
+  - state-space-models
+  - mamba
+  - sharp-wave-ripples
+  - generative-replay
+  - edge-robotics
+  - quadruped

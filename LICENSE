@@ -1,0 +1,9 @@
+TBD — the team has not yet chosen a license.
+
+Candidates to discuss:
+- MIT — permissive, industry-friendly.
+- Apache-2.0 — permissive + explicit patent grant (useful because robotics hardware integration may involve patented sensors/SDKs).
+- CC-BY-4.0 — for documentation and lit-review only (not code).
+- BSD-3-Clause — another permissive option.
+
+Once chosen, replace this file with the license text. If different licenses apply to code vs. data vs. docs, note that here.

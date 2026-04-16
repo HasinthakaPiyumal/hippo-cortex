@@ -1,0 +1,74 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+build/
+dist/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Notebooks
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Editors / IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Datasets — track shell only
+data/*
+!data/.gitkeep
+!data/README.md
+
+# Model weights — track shell only
+checkpoints/*
+!checkpoints/.gitkeep
+!checkpoints/README.md
+
+# Experiment outputs — track shell only
+results/*
+!results/.gitkeep
+!results/README.md
+
+# Experiment trackers
+wandb/
+mlruns/
+lightning_logs/
+tb_logs/
+runs/
+
+# Obsidian workspace state (keep notes, skip per-machine caches)
+lit-review/.obsidian/workspace*
+lit-review/.obsidian/cache
+lit-review/.trash/
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+docs/progress-reports/
