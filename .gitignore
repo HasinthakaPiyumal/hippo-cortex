@@ -72,3 +72,10 @@ lit-review/.trash/
 *.fls
 *.fdb_latexmk
 docs/progress-reports/
+proposal/*.py
+proposal/_review/
+proposal/Group07_Milestone_1_2026-04-17.docx
+proposal/Group07_Milestone_1_2026-04-17.pdf
+proposal/latex/build/
+lit-review/
+papers/*

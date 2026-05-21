@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__googledocs__create-doc",
+      "Bash(python proposal/build_timeline_pdf.py)",
+      "mcp__plugin_pdf-viewer_pdf__display_pdf",
+      "mcp__plugin_pdf-viewer_pdf__interact",
+      "mcp__b0d0ac7c-6d7c-4388-ba53-b9ae2b1075ce__notion-fetch",
+      "mcp__b0d0ac7c-6d7c-4388-ba53-b9ae2b1075ce__notion-search",
+      "mcp__Claude_in_Chrome__tabs_context_mcp",
+      "mcp__Claude_in_Chrome__navigate"
+    ]
+  }
+}
