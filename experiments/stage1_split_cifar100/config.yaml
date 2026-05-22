@@ -1,0 +1,28 @@
+seed: 42
+
+dataset:
+  name: split_cifar100
+  n_tasks: 20
+  n_classes_per_task: 5
+  root: data/cifar100
+
+model:
+  mamba_d_model: 128
+  mamba_n_layers: 4
+  mamba_d_state: 16
+  cvae_latent_dim: 64
+  cvae_hidden_dim: 512
+  nsp_rank_budget: 200
+
+training:
+  epochs_warmup: 5
+  epochs_joint: 10
+  epochs_consolidation: 3
+  lr: 1.0e-3
+  batch_size: 64
+  optimizer: adamw
+
+logging:
+  wandb_project: hippocortex-stage1
+  run_name: null
+  save_dir: results/stage1_split_cifar100

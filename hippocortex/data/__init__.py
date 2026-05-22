@@ -1,0 +1,2 @@
+from hippocortex.data.split_cifar100 import get_task_loaders as get_split_cifar100_loaders
+from hippocortex.data.imagenet_r import get_task_loaders as get_imagenet_r_loaders
