@@ -1,28 +1,122 @@
-seed: 42
+# =============================================================================
+# HippoCortex — Stage 1 / Split-CIFAR100
+# =============================================================================
+# DO NOT change values mid-experiment. All benchmark runs in Paper 1 use
+# exactly these settings. Override on the CLI if you need a sweep:
+#   python run.py training.lr=3e-4
+# Every override is logged to W&B so results stay traceable.
+# =============================================================================
 
+# -----------------------------------------------------------------------------
+# Reproducibility
+# -----------------------------------------------------------------------------
+seed: 42
+# 42 is used by Mamba-CL and Inf-SSM baselines — keeping the same seed lets
+# us attribute accuracy differences to the algorithm, not random init.
+
+# -----------------------------------------------------------------------------
+# Dataset
+# -----------------------------------------------------------------------------
 dataset:
   name: split_cifar100
-  n_tasks: 20
-  n_classes_per_task: 5
-  root: data/cifar100
+  root: data/cifar100          # relative to repo root; gitignored
 
+  n_tasks: 20                  # 20 disjoint tasks drawn from CIFAR-100
+  n_classes_per_task: 5        # 20 × 5 = 100 classes total
+
+  # Data loading
+  num_workers: 4               # DataLoader worker threads; set to 0 on Windows
+  pin_memory: true             # faster GPU transfer; set false if RAM is tight
+
+  # Augmentation (training split only)
+  augment: true                # random crop + horizontal flip — standard CIFAR
+  image_size: 32               # native CIFAR-100 resolution
+
+# -----------------------------------------------------------------------------
+# Model architecture
+# -----------------------------------------------------------------------------
 model:
-  mamba_d_model: 128
-  mamba_n_layers: 4
-  mamba_d_state: 16
-  cvae_latent_dim: 64
-  cvae_hidden_dim: 512
-  nsp_rank_budget: 200
+  # Mamba SSM backbone
+  mamba_d_model: 128           # hidden state dimension (embedding width)
+  mamba_n_layers: 4            # number of stacked Mamba blocks
+  mamba_d_state: 16            # SSM recurrent state size (S4 parameter N)
+  mamba_expand: 2              # inner dimension = d_model × expand
+  mamba_d_conv: 4              # depthwise conv kernel width inside Mamba block
+  mamba_dropout: 0.0           # dropout on Mamba block output; 0 = disabled
+
+  # Conditional VAE (SWR generator)
+  cvae_latent_dim: 64          # bottleneck — compressed memory trace width
+  cvae_hidden_dim: 512         # MLP hidden size in encoder and decoder
+  cvae_n_layers: 2             # MLP depth in encoder / decoder
+
+  # Null-space projector
+  nsp_rank_budget: 200         # max number of singular vectors kept per task;
+                               # total basis U has shape (d_model, rank_budget)
+                               # Mamba-CL uses 200 for CIFAR-100
+
+# -----------------------------------------------------------------------------
+# Training — three phases per task
+# -----------------------------------------------------------------------------
+# Total epochs per task = epochs_warmup + epochs_joint + epochs_consolidation
+# = 5 + 10 + 3 = 18 epochs / task × 20 tasks = 360 epochs total
 
 training:
+  # Phase 1 — Warmup
+  # Pure cross-entropy on the current task. No replay, no projection.
+  # Warms the task head and lets the backbone specialise before gradients
+  # are constrained by the null-space projector.
   epochs_warmup: 5
-  epochs_joint: 10
-  epochs_consolidation: 3
-  lr: 1.0e-3
-  batch_size: 64
-  optimizer: adamw
 
+  # Phase 2 — Joint
+  # CE on current task + ELBO on SWR-generated past hidden states.
+  # All backbone gradients projected through P = I − UUᵀ.
+  epochs_joint: 10
+
+  # Phase 3 — Consolidation (sleep)
+  # Update StatsBuffer (µ, σ²) and extend null-space basis U.
+  # No weight updates to backbone — pure bookkeeping + VAE fine-tune.
+  epochs_consolidation: 3
+
+  # Optimiser (backbone — Phase 1 and 2)
+  optimizer: adamw
+  lr: 1.0e-3                   # matches Mamba-CL paper (Table 2)
+  weight_decay: 1.0e-4         # L2 regularisation via AdamW decoupling
+  betas: [0.9, 0.999]          # AdamW momentum terms (PyTorch defaults)
+
+  # Optimiser (CVAE — Phase 3 only)
+  cvae_lr: 3.0e-4
+  cvae_weight_decay: 0.0
+
+  # Learning rate scheduler (cosine, per task)
+  lr_scheduler: cosine         # "cosine" | "constant"
+  lr_min: 1.0e-5               # floor for cosine schedule
+
+  # Data
+  batch_size: 64               # matches Mamba-CL / Inf-SSM for fair comparison
+
+  # Gradient clipping (Phase 2 only, after projection)
+  grad_clip: 1.0               # max gradient norm; null = disabled
+
+  # ELBO weighting (Phase 2)
+  kl_weight: 1.0e-3            # β in β-VAE loss: L = CE + β × KL
+                               # start small — ramp up once CVAE is stable
+
+# -----------------------------------------------------------------------------
+# Evaluation
+# -----------------------------------------------------------------------------
+eval:
+  eval_after_each_task: true   # compute acc on all seen tasks after each task
+  eval_batch_size: 256         # larger batch is fine — no gradients
+
+# -----------------------------------------------------------------------------
+# Logging & checkpointing
+# -----------------------------------------------------------------------------
 logging:
   wandb_project: hippocortex-stage1
-  run_name: null
+  run_name: null               # null → auto: "scifar100_seed42_YYYYMMDD_HHMMSS"
   save_dir: results/stage1_split_cifar100
+
+  save_checkpoint: true        # save model weights after each task
+  checkpoint_dir: results/stage1_split_cifar100/checkpoints
+
+  log_every_n_batches: 50      # loss logging granularity inside an epoch
