@@ -16,6 +16,7 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 from torch import Tensor
+from mamba_ssm import Mamba
 
 
 class MambaBackbone(nn.Module):
@@ -28,7 +29,14 @@ class MambaBackbone(nn.Module):
             n_classes: Output classes for the current task head.
         """
         super().__init__()
-        raise NotImplementedError
+        self.layers = nn.ModuleList([Mamba(d_model=d_model, d_state=d_state) for _ in range(n_layers)])
+        self.head = nn.Linear(d_model, n_classes)
+        self._captured_hidden = None
+        self.layers[-1].register_forward_hook(self._capture_hook)
+
+    def _capture_hook(self, module, input, output) -> None:
+        # output shape: (B, T, d_model) — mean-pool over sequence to get (B, d_model)
+        self._captured_hidden = output.mean(dim=1)
 
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
         """
@@ -39,7 +47,12 @@ class MambaBackbone(nn.Module):
             logits:        (B, n_classes)
             hidden_states: (B, d_model) — mean-pooled output of last SSM layer.
         """
-        raise NotImplementedError
+        h = x
+        for layer in self.layers:
+            h = layer(h)
+        hidden_states = self._captured_hidden
+        logits = self.head(hidden_states)
+        return logits, hidden_states
 
     def extract_hidden(self, x: Tensor) -> Tensor:
         """
@@ -49,8 +62,10 @@ class MambaBackbone(nn.Module):
         Returns:
             (B, d_model)
         """
-        raise NotImplementedError
+        _, hidden = self.forward(x)
+        return hidden
 
     def set_task_head(self, n_classes: int) -> None:
         """Replace the classification head for a new task (task-incremental setting)."""
-        raise NotImplementedError
+        d_model = self.head.in_features
+        self.head = nn.Linear(d_model, n_classes).to(next(self.parameters()).device)
