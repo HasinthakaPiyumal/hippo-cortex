@@ -1,368 +1,342 @@
 """
 experiments/stage1_split_cifar100/run_finetune.py
-──────────────────────────────────────────────────
-Sequential Fine-Tuning Baseline (Lower Bound)
+==================================================
+Sequential fine-tuning baseline for Split-CIFAR100.
 
-This is the **simplest possible continual learner**: train on each task in
-sequence, no replay buffer, no projector, no regularisation.  Every gradient
-update overwrites whatever the network learned on previous tasks.  The result
-is the *worst-case* catastrophic-forgetting curve that every other method in
-the paper must beat.
+This is the **lower-bound** ("Seq" / "naive fine-tuning") baseline used
+throughout the continual learning literature and reported as "Seq" in the
+Inf-SSM paper (Lee et al. 2025, Tables 4 & 5).
 
-In the milestone doc this is labelled "Naive Fine-Tuning (No CL)" and shown
-as the dashed line in Figure 5.2.  In the Inf-SSM paper (Tab. 1/4/5) the
-equivalent entry is "Seq".
+The model trains on Task 1, then Task 2, … Task T with **no** replay,
+**no** regularisation, and **no** gradient projection.  Each new task's
+data simply overwrites prior knowledge — catastrophic forgetting in its
+purest form.  Every other method in Stage 1 must beat these numbers.
 
 Usage
-─────
-    python experiments/stage1_split_cifar100/run_finetune.py [--options]
+-----
+    python experiments/stage1_split_cifar100/run_finetune.py
 
-    # minimal run (CPU, quick smoke-test with fewer epochs):
-    python experiments/stage1_split_cifar100/run_finetune.py \\
-        --epochs 5 --device cpu
+    # Override defaults via CLI:
+    python experiments/stage1_split_cifar100/run_finetune.py \
+        --n-tasks 20 --epochs 5 --batch-size 64 --lr 1e-3 \
+        --seed 42 --device cuda --results-dir results/finetune
 
-    # full run matching Inf-SSM paper protocol:
-    python experiments/stage1_split_cifar100/run_finetune.py \\
-        --epochs 50 --device cuda --num_tasks 10 --seed 42
+Integration with Hasinthaka's trainer
+--------------------------------------
+When the shared trainer module is ready, replace the local
+`_train_one_epoch` and `_evaluate` stubs with:
 
-Outputs
-───────
-    results/finetune/R_matrix.npy   — T×T accuracy matrix
-    results/finetune/metrics.json   — {AA, AIA, FM}
-    results/finetune/run_log.txt    — per-epoch loss / accuracy
+    from hippocortex.trainer import Trainer
+    trainer = Trainer(model, ...)
+    trainer.fit(task_train_loader)
+    acc = trainer.evaluate(task_test_loader)
 
-Plug-in point for Hasinthaka's trainer
-───────────────────────────────────────
-    Replace the `train_one_task()` function below with a call to
-    hippocortex.trainer.Trainer.  The rest of the script (data loading,
-    evaluation loop, metric computation) stays exactly the same.
+Everything else (the outer task loop, the R-matrix accumulation, and
+the final metric computation) stays unchanged.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import logging
 import os
+import random
 import time
 from pathlib import Path
+from typing import List
 
-import numpy as np
 import torch
 import torch.nn as nn
-import torch.optim as optim
 from torch.utils.data import DataLoader, Subset
-from torchvision import datasets, models, transforms
+import torchvision
+import torchvision.transforms as transforms
 
-# ── project imports ───────────────────────────────────────────────────
-# Make sure PYTHONPATH includes the repo root, or install the package:
-#   pip install -e .
-from hippocortex.utils.metrics import compute_all   # AA, AIA, FM
-
-# ─────────────────────────────────────────────────────────────────────
-# Logging
-# ─────────────────────────────────────────────────────────────────────
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    datefmt="%H:%M:%S",
-)
-log = logging.getLogger(__name__)
+# Project imports
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))   # repo root
+from utils.metrics import average_accuracy, average_incremental_accuracy, forgetting_measure
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Argument parsing
-# ─────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Defaults
+# ---------------------------------------------------------------------------
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        description="Sequential fine-tuning lower bound on Split-CIFAR-100"
-    )
-    p.add_argument("--data_root",  default="~/data", type=str,
-                   help="Root directory for CIFAR-100 download/cache.")
-    p.add_argument("--out_dir",    default="results/finetune", type=str,
-                   help="Directory to save R matrix, metrics, and log.")
-    p.add_argument("--num_tasks",  default=10, type=int,
-                   help="Number of equal-sized class-incremental tasks.")
-    p.add_argument("--epochs",     default=50, type=int,
-                   help="Training epochs per task.")
-    p.add_argument("--batch_size", default=64, type=int)
-    p.add_argument("--lr",         default=1e-3, type=float)
-    p.add_argument("--device",     default="cuda",
-                   choices=["cuda", "cpu", "mps"])
-    p.add_argument("--seed",       default=42, type=int)
-    p.add_argument("--num_workers", default=4, type=int)
-    return p.parse_args()
+CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
+CIFAR100_STD  = (0.2675, 0.2565, 0.2761)
+N_CLASSES     = 100   # total CIFAR-100 classes
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Data helpers
-# ─────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Dataset helpers
+# ---------------------------------------------------------------------------
 
-_CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
-_CIFAR100_STD  = (0.2675, 0.2565, 0.2761)
-
-
-def build_transforms() -> tuple[transforms.Compose, transforms.Compose]:
-    train_tf = transforms.Compose([
+def get_cifar100(data_root: str = "./data") -> tuple:
+    """Download CIFAR-100 and return (train_dataset, test_dataset)."""
+    transform_train = transforms.Compose([
         transforms.RandomCrop(32, padding=4),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        transforms.Normalize(_CIFAR100_MEAN, _CIFAR100_STD),
+        transforms.Normalize(CIFAR100_MEAN, CIFAR100_STD),
     ])
-    test_tf = transforms.Compose([
+    transform_test = transforms.Compose([
         transforms.ToTensor(),
-        transforms.Normalize(_CIFAR100_MEAN, _CIFAR100_STD),
+        transforms.Normalize(CIFAR100_MEAN, CIFAR100_STD),
     ])
-    return train_tf, test_tf
+    train_ds = torchvision.datasets.CIFAR100(
+        root=data_root, train=True, download=True, transform=transform_train
+    )
+    test_ds = torchvision.datasets.CIFAR100(
+        root=data_root, train=False, download=True, transform=transform_test
+    )
+    return train_ds, test_ds
 
 
 def make_task_splits(
-    root: str,
-    num_tasks: int,
-    train_tf,
-    test_tf,
-) -> tuple[list[DataLoader], list[DataLoader]]:
+    train_ds, test_ds, n_tasks: int, seed: int
+) -> List[tuple]:
     """
-    Split CIFAR-100 into `num_tasks` class-incremental tasks.
+    Split 100 CIFAR-100 classes into n_tasks disjoint groups.
 
-    CIFAR-100 has 100 classes; with num_tasks=10 each task gets 10 classes.
-    Classes are sorted and split sequentially (same as Inf-SSM / Mamba-CL
-    benchmark protocol).
-
-    Returns
-    -------
-    train_loaders, test_loaders : lists of length num_tasks
+    Returns a list of (train_subset, test_subset, class_indices) tuples,
+    one per task.  Class indices are shuffled deterministically by `seed`
+    so results are reproducible.
     """
-    root = os.path.expanduser(root)
-    full_train = datasets.CIFAR100(root, train=True,  download=True, transform=train_tf)
-    full_test  = datasets.CIFAR100(root, train=False, download=True, transform=test_tf)
+    rng = random.Random(seed)
+    classes = list(range(N_CLASSES))
+    rng.shuffle(classes)
 
-    total_classes = 100
-    classes_per_task = total_classes // num_tasks
-    assert total_classes % num_tasks == 0, (
-        f"100 classes must be divisible by num_tasks; got {num_tasks}"
-    )
+    classes_per_task = N_CLASSES // n_tasks
+    task_splits = []
+    for t in range(n_tasks):
+        task_classes = set(classes[t * classes_per_task: (t + 1) * classes_per_task])
 
-    train_loaders, test_loaders = [], []
+        train_idx = [i for i, (_, y) in enumerate(train_ds) if y in task_classes]
+        test_idx  = [i for i, (_, y) in enumerate(test_ds)  if y in task_classes]
 
-    for t in range(num_tasks):
-        class_start = t * classes_per_task
-        class_end   = class_start + classes_per_task
-        task_classes = list(range(class_start, class_end))
-
-        # Indices of samples that belong to this task's classes
-        tr_idx = [i for i, (_, y) in enumerate(full_train)
-                  if y in task_classes]
-        te_idx = [i for i, (_, y) in enumerate(full_test)
-                  if y in task_classes]
-
-        train_loaders.append(
-            DataLoader(Subset(full_train, tr_idx), batch_size=64,
-                       shuffle=True, num_workers=4, pin_memory=True)
-        )
-        test_loaders.append(
-            DataLoader(Subset(full_test, te_idx), batch_size=256,
-                       shuffle=False, num_workers=4, pin_memory=True)
-        )
-
-    return train_loaders, test_loaders
+        task_splits.append((
+            Subset(train_ds, train_idx),
+            Subset(test_ds,  test_idx),
+            sorted(task_classes),
+        ))
+    return task_splits
 
 
-# ─────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Model
-# ─────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
-def build_model(num_classes: int = 100) -> nn.Module:
+def build_model(n_classes: int, device: torch.device) -> nn.Module:
     """
-    ResNet-18 with a fresh linear head for *all* 100 CIFAR-100 classes.
+    Placeholder backbone.
 
-    Using a shared head (all 100 outputs always visible) is the standard
-    "single-head" evaluation protocol used by Inf-SSM and most exemplar-free
-    CL papers.  Task ID is NOT given at inference time.
+    Once Hasinthaka's Mamba backbone is integrated, replace this with:
+        from hippocortex.backbone import MambaBackbone
+        model = MambaBackbone(n_classes=n_classes)
 
-    Swap this function out if the team decides on a different backbone
-    (e.g., Mamba-CL's SSM encoder) — nothing else needs to change.
+    For now we use a small ResNet-18 so the pipeline can be tested
+    end-to-end immediately.
     """
-    model = models.resnet18(weights=None)
-    # Adapt for 32×32 CIFAR images (remove the aggressive downsampling)
-    model.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
-    model.maxpool = nn.Identity()
-    model.fc = nn.Linear(model.fc.in_features, num_classes)
-    return model
+    model = torchvision.models.resnet18(weights=None)
+    model.fc = nn.Linear(model.fc.in_features, n_classes)
+    return model.to(device)
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Training / evaluation
-# ─────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Training & evaluation stubs
+# (replace internals with Hasinthaka's trainer when ready)
+# ---------------------------------------------------------------------------
 
-def train_one_task(
+def _train_one_epoch(
     model: nn.Module,
     loader: DataLoader,
-    epochs: int,
-    lr: float,
+    optimizer: torch.optim.Optimizer,
+    criterion: nn.Module,
     device: torch.device,
-    task_idx: int,
-) -> None:
-    """
-    Fine-tune `model` on a single task for `epochs` epochs.
-
-    ┌─────────────────────────────────────────────────────────┐
-    │  PLUG-IN POINT FOR HASINTHAKA'S TRAINER                 │
-    │                                                         │
-    │  Replace the body of this function with:                │
-    │                                                         │
-    │      from hippocortex.trainer import Trainer            │
-    │      trainer = Trainer(model, cfg)                      │
-    │      trainer.fit(loader, task_id=task_idx)              │
-    │                                                         │
-    │  The R-matrix evaluation loop below stays unchanged.    │
-    └─────────────────────────────────────────────────────────┘
-
-    This baseline version: plain cross-entropy + Adam, no regularisation,
-    no replay, no projector — pure catastrophic forgetting.
-    """
+) -> float:
+    """Train for one epoch.  Returns average cross-entropy loss."""
     model.train()
-    criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
-
-    for epoch in range(1, epochs + 1):
-        total_loss, correct, total = 0.0, 0, 0
-
-        for x, y in loader:
-            x, y = x.to(device), y.to(device)
-            optimizer.zero_grad()
-            logits = model(x)
-            loss   = criterion(logits, y)
-            loss.backward()
-            optimizer.step()
-
-            total_loss += loss.item() * x.size(0)
-            correct    += (logits.argmax(1) == y).sum().item()
-            total      += x.size(0)
-
-        scheduler.step()
-
-        if epoch % 10 == 0 or epoch == epochs:
-            log.info(
-                "  Task %d | epoch %3d/%d | loss %.4f | train acc %.2f%%",
-                task_idx + 1, epoch, epochs,
-                total_loss / total, 100.0 * correct / total,
-            )
+    total_loss = 0.0
+    for x, y in loader:
+        x, y = x.to(device), y.to(device)
+        optimizer.zero_grad()
+        loss = criterion(model(x), y)
+        loss.backward()
+        optimizer.step()
+        total_loss += loss.item() * x.size(0)
+    return total_loss / len(loader.dataset)
 
 
 @torch.no_grad()
-def evaluate(
+def _evaluate(
     model: nn.Module,
     loader: DataLoader,
     device: torch.device,
 ) -> float:
-    """Return accuracy (%) on the given data loader."""
+    """Return top-1 accuracy in [0, 100]."""
     model.eval()
-    correct, total = 0, 0
+    correct = total = 0
     for x, y in loader:
         x, y = x.to(device), y.to(device)
-        pred   = model(x).argmax(dim=1)
-        correct += (pred == y).sum().item()
-        total   += x.size(0)
+        preds = model(x).argmax(dim=1)
+        correct += (preds == y).sum().item()
+        total   += y.size(0)
     return 100.0 * correct / total
 
 
-# ─────────────────────────────────────────────────────────────────────
-# Main experiment loop
-# ─────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Main training loop
+# ---------------------------------------------------------------------------
 
-def main() -> None:
-    args   = parse_args()
-    device = torch.device(
-        args.device if torch.cuda.is_available() or args.device != "cuda"
-        else "cpu"
-    )
+def run(args: argparse.Namespace) -> dict:
+    """
+    Full sequential fine-tuning run.
 
-    # Reproducibility
+    Returns
+    -------
+    dict with keys: AA, AIA, FM, R
+    """
+    # ---- Reproducibility ----
+    random.seed(args.seed)
     torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
-    out_dir = Path(args.out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    print(f"[run_finetune] device={device}  n_tasks={args.n_tasks}  "
+          f"epochs={args.epochs}  seed={args.seed}")
 
-    log.info("=" * 60)
-    log.info("HippoCortex — Sequential Fine-Tuning Baseline (lower bound)")
-    log.info("  num_tasks=%d | epochs/task=%d | device=%s | seed=%d",
-             args.num_tasks, args.epochs, device, args.seed)
-    log.info("=" * 60)
+    # ---- Data ----
+    print("[run_finetune] Loading CIFAR-100 …")
+    train_ds, test_ds = get_cifar100(args.data_root)
+    task_splits = make_task_splits(train_ds, test_ds, args.n_tasks, args.seed)
+    n_classes_per_task = N_CLASSES // args.n_tasks
 
-    # ── Data ──────────────────────────────────────────────────────────
-    train_tf, test_tf = build_transforms()
-    train_loaders, test_loaders = make_task_splits(
-        args.data_root, args.num_tasks, train_tf, test_tf
+    # ---- Model ----
+    # NOTE: we build a single shared-head model.  In a task-incremental
+    # setup you might also use per-task heads; adjust here when the
+    # backbone interface is finalised.
+    model = build_model(N_CLASSES, device)
+    criterion = nn.CrossEntropyLoss()
+
+    # ---- Result matrix R (0-based) ----
+    # R[i][j] = accuracy on task j after training through task i
+    T = args.n_tasks
+    R: List[List[float]] = [[0.0] * T for _ in range(T)]
+
+    # Build all test loaders upfront (we'll evaluate on every seen task
+    # after each training task).
+    test_loaders = [
+        DataLoader(
+            task_splits[t][1],
+            batch_size=args.batch_size * 2,
+            shuffle=False,
+            num_workers=args.num_workers,
+        )
+        for t in range(T)
+    ]
+
+    # ---- Outer task loop ----
+    for task_idx in range(T):
+        train_subset, _, task_classes = task_splits[task_idx]
+
+        print(f"\n{'='*60}")
+        print(f"[Task {task_idx + 1}/{T}]  classes={task_classes}")
+        print(f"{'='*60}")
+
+        train_loader = DataLoader(
+            train_subset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=args.num_workers,
+            drop_last=True,
+        )
+
+        # Fresh optimizer each task — the defining feature of naive fine-tuning.
+        # (No EWC penalty, no gradient projection, no replay buffer.)
+        optimizer = torch.optim.SGD(
+            model.parameters(),
+            lr=args.lr,
+            momentum=0.9,
+            weight_decay=5e-4,
+        )
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=args.epochs
+        )
+
+        # ---- Inner epoch loop ----
+        for epoch in range(1, args.epochs + 1):
+            t0 = time.time()
+            loss = _train_one_epoch(model, train_loader, optimizer, criterion, device)
+            scheduler.step()
+            elapsed = time.time() - t0
+            print(f"  epoch {epoch:3d}/{args.epochs}  loss={loss:.4f}  "
+                  f"lr={scheduler.get_last_lr()[0]:.5f}  ({elapsed:.1f}s)")
+
+        # ---- Evaluate on every task seen so far ----
+        print(f"\n  [Evaluation after task {task_idx + 1}]")
+        for j in range(task_idx + 1):
+            acc = _evaluate(model, test_loaders[j], device)
+            R[task_idx][j] = acc
+            print(f"    task {j + 1:3d} accuracy: {acc:.2f}%")
+
+    # ---- Final metrics ----
+    aa  = average_accuracy(R)
+    aia = average_incremental_accuracy(R)
+    fm  = forgetting_measure(R)
+
+    print(f"\n{'='*60}")
+    print("FINAL METRICS  (Seq / naive fine-tuning lower bound)")
+    print(f"{'='*60}")
+    print(f"  Average Accuracy       (AA)  = {aa:.2f}%")
+    print(f"  Avg Incremental Acc   (AIA)  = {aia:.2f}%")
+    print(f"  Forgetting Measure     (FM)  = {fm:.2f}%")
+
+    # ---- Save results ----
+    results_dir = Path(args.results_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    import json
+    out = {
+        "method":  "finetune",
+        "dataset": "split_cifar100",
+        "n_tasks": T,
+        "epochs":  args.epochs,
+        "seed":    args.seed,
+        "AA":      aa,
+        "AIA":     aia,
+        "FM":      fm,
+        "R":       R,
+    }
+    out_path = results_dir / f"finetune_T{T}_seed{args.seed}.json"
+    with open(out_path, "w") as f:
+        json.dump(out, f, indent=2)
+    print(f"\n  Results saved → {out_path}")
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(
+        description="Sequential fine-tuning baseline on Split-CIFAR100."
     )
-
-    # ── Model ─────────────────────────────────────────────────────────
-    model = build_model(num_classes=100).to(device)
-    log.info("Backbone: ResNet-18 (CIFAR variant), %.2fM params",
-             sum(p.numel() for p in model.parameters()) / 1e6)
-
-    # ── R matrix: R[i][j] = acc on task j after training on task i ───
-    T = args.num_tasks
-    R = np.zeros((T, T), dtype=np.float64)
-
-    t0 = time.time()
-
-    for task_i in range(T):
-        log.info("─" * 50)
-        log.info(">>> Training on task %d / %d", task_i + 1, T)
-
-        # Fine-tune on task i (no replay, no regularisation)
-        train_one_task(
-            model, train_loaders[task_i],
-            epochs=args.epochs, lr=args.lr,
-            device=device, task_idx=task_i,
-        )
-
-        # Evaluate on ALL tasks seen so far (fill row i of R)
-        log.info("    Evaluating on tasks 1 – %d …", task_i + 1)
-        for task_j in range(task_i + 1):
-            acc = evaluate(model, test_loaders[task_j], device)
-            R[task_i, task_j] = acc
-            log.info("      a_{%d,%d} = %.2f%%", task_i + 1, task_j + 1, acc)
-
-    elapsed = time.time() - t0
-    log.info("Total training time: %.1f s (%.1f min)", elapsed, elapsed / 60)
-
-    # ── Compute metrics ───────────────────────────────────────────────
-    metrics = compute_all(R)
-    log.info("=" * 60)
-    log.info("RESULTS (Sequential Fine-Tuning — Lower Bound)")
-    log.info("  AA  = %.2f%%  ↑ (higher is better)", metrics["AA"])
-    log.info("  AIA = %.2f%%  ↑ (higher is better)", metrics["AIA"])
-    log.info("  FM  = %.2f%%  ↓ (lower is better)",  metrics["FM"])
-    log.info("=" * 60)
-
-    # ── Save ──────────────────────────────────────────────────────────
-    np.save(out_dir / "R_matrix.npy", R)
-    log.info("Saved R matrix → %s", out_dir / "R_matrix.npy")
-
-    with open(out_dir / "metrics.json", "w") as f:
-        json.dump(
-            {
-                "method": "sequential_finetune",
-                "num_tasks": T,
-                "epochs_per_task": args.epochs,
-                "seed": args.seed,
-                "AA":  metrics["AA"],
-                "AIA": metrics["AIA"],
-                "FM":  metrics["FM"],
-            },
-            f, indent=2,
-        )
-    log.info("Saved metrics   → %s", out_dir / "metrics.json")
-
-    # Pretty-print the R matrix for the log
-    log.info("\nR matrix (R[i][j] = acc on task j+1 after task i+1):\n%s",
-             np.array2string(R, formatter={"float_kind": lambda x: f"{x:6.2f}"}))
+    p.add_argument("--n-tasks",     type=int,   default=20,
+                   help="Number of tasks to split CIFAR-100 into (default 20)")
+    p.add_argument("--epochs",      type=int,   default=5,
+                   help="Training epochs per task (default 5)")
+    p.add_argument("--batch-size",  type=int,   default=64)
+    p.add_argument("--lr",          type=float, default=1e-3)
+    p.add_argument("--seed",        type=int,   default=42)
+    p.add_argument("--device",      type=str,   default="cuda",
+                   help="'cuda' or 'cpu'")
+    p.add_argument("--num-workers", type=int,   default=4)
+    p.add_argument("--data-root",   type=str,   default="./data")
+    p.add_argument("--results-dir", type=str,   default="results/finetune")
+    return p.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    args = parse_args()
+    run(args)
