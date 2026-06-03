@@ -31,12 +31,6 @@ class MambaBackbone(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList([Mamba(d_model=d_model, d_state=d_state) for _ in range(n_layers)])
         self.head = nn.Linear(d_model, n_classes)
-        self._captured_hidden = None
-        self.layers[-1].register_forward_hook(self._capture_hook)
-
-    def _capture_hook(self, module, input, output) -> None:
-        # output shape: (B, T, d_model) — mean-pool over sequence to get (B, d_model)
-        self._captured_hidden = output.mean(dim=1)
 
     def forward(self, x: Tensor) -> tuple[Tensor, Tensor]:
         """
@@ -50,7 +44,7 @@ class MambaBackbone(nn.Module):
         h = x
         for layer in self.layers:
             h = layer(h)
-        hidden_states = self._captured_hidden
+        hidden_states = h.mean(dim=1)
         logits = self.head(hidden_states)
         return logits, hidden_states
 
@@ -62,8 +56,10 @@ class MambaBackbone(nn.Module):
         Returns:
             (B, d_model)
         """
-        _, hidden = self.forward(x)
-        return hidden
+        h = x
+        for layer in self.layers:
+            h = layer(h)
+        return h.mean(dim=1)
 
     def set_task_head(self, n_classes: int) -> None:
         """Replace the classification head for a new task (task-incremental setting)."""
