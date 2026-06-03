@@ -40,7 +40,19 @@ class NullSpaceProjector:
         Updates self._U in-place (appends new singular vectors, then truncates to
         rank_budget if necessary).
         """
-        raise NotImplementedError
+        _, S, Vt = torch.linalg.svd(hidden_states, full_matrices=False)
+        var = S ** 2
+        cumulative_ratio = torch.cumsum(var, dim=0) / var.sum()
+        r = int((cumulative_ratio < 0.99).sum().item()) + 1
+        r = min(r, Vt.shape[0])
+        new_dirs = Vt[:r].T
+        if self._U is None:
+            combined = new_dirs
+        else:
+            combined = torch.cat([self._U, new_dirs], dim=1)
+        Q, _ = torch.linalg.qr(combined)
+        k_new = min(Q.shape[1], self.rank_budget)
+        self._U = Q[:, :k_new]
 
     def project(self, grad: Tensor) -> Tensor:
         """
@@ -53,7 +65,9 @@ class NullSpaceProjector:
             Projected gradient with same shape as input.
             If no tasks have been seen yet (U is None), returns grad unchanged.
         """
-        raise NotImplementedError
+        if self._U is None:
+            return grad
+        return grad - (grad @ self._U) @ self._U.T
 
     @property
     def current_rank(self) -> int:
