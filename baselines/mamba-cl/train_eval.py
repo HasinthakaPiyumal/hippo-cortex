@@ -721,7 +721,10 @@ if __name__ == "__main__":
 
     for taskid, current_task_classes in GVM.cl_mngr:
         if taskid == 0:
-            model: DefocusAttentionNetwork = build_model(get_config("./utils/defocus_mamba_large_22k.yaml"))
+            import os
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils/defocus_mamba_large_22k.yaml")
+            model: DefocusAttentionNetwork = build_model(get_config(config_path))
+
             ckpt = torch.load(args.pretrained_path, map_location='cpu')
             model.load_state_dict(ckpt['model'], strict=False)
             setattr(model, 'pretrained_cfg', {})
