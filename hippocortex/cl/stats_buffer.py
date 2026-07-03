@@ -33,7 +33,9 @@ class StatsBuffer:
             hidden_states: Shape (N, d_model) — a batch of hidden states collected
                            across the training set of the completed task.
         """
-        raise NotImplementedError
+        mu = hidden_states.mean(dim=0)
+        sigma2 = hidden_states.var(dim=0, unbiased=False)
+        self._store[task_id] = (mu, sigma2)
 
     def get_stats(self, task_id: int) -> tuple[Tensor, Tensor]:
         """
@@ -46,7 +48,9 @@ class StatsBuffer:
         Raises:
             KeyError if task_id has not been stored yet.
         """
-        raise NotImplementedError
+        if task_id not in self._store:
+            raise KeyError(f"Task {task_id} has not been stored yet.")
+        return self._store[task_id]
 
     def task_ids(self) -> list[int]:
         """Return sorted list of all stored task ids."""
@@ -57,4 +61,12 @@ class StatsBuffer:
         Return exact byte count of all stored tensors.
         Must satisfy: bytes == len(task_ids) * d_model * 2 * element_size.
         """
-        raise NotImplementedError
+        if not self._store:
+            return 0
+        
+        # Retrieve the first task's mu tensor to find d_model and element_size
+        first_mu = next(iter(self._store.values()))[0]
+        d_model = first_mu.shape[0]
+        element_size = first_mu.element_size()
+        return len(self._store) * d_model * 2 * element_size
+
