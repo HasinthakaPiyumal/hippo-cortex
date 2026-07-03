@@ -15,11 +15,30 @@ from pathlib import Path
 
 
 def download_cifar100(root: Path) -> None:
-    raise NotImplementedError
+    cifar_dir = root / "cifar100"
+    cifar_dir.mkdir(parents=True, exist_ok=True)
+    tar_file = cifar_dir / "cifar-100-python.tar.gz"
+    extract_dir = cifar_dir / "cifar-100-python"
+
+    if not extract_dir.exists():
+        if not tar_file.exists():
+            print("Downloading CIFAR-100 from Google Drive via gdown...")
+            import gdown
+            file_id = "1SjQ7aL1NHX9DqeC72oqmX82lzuv7-FIM"
+            gdown.download(id=file_id, output=str(tar_file), quiet=False)
+
+        print("Extracting CIFAR-100 dataset...")
+        import tarfile
+        with tarfile.open(tar_file, "r:gz") as tar:
+            tar.extractall(path=str(cifar_dir))
+        print("CIFAR-100 extraction complete.")
+    else:
+        print("CIFAR-100 dataset already extracted.")
 
 
 def download_imagenet_r(root: Path) -> None:
     raise NotImplementedError
+
 
 
 def main() -> None:
