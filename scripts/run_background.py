@@ -15,6 +15,7 @@ cmd = [
     "--null_eta", "0.95",
     "--use_null_space",
     "--seed", "2024",
+    "-b", "800",                            # Batch size 800
     "--use_amp", "True",                     # Enable mixed precision (float16)
     "-jt", "4",                              # Optimize CPU loader workers
     "--use_wandb"
