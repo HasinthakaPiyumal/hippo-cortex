@@ -1,0 +1,163 @@
+%% appendices/appendixA.tex
+%% ============================================================================
+%% APPENDIX A: SOURCE CODE
+%% ============================================================================
+%%
+%% PURPOSE: Include complete code that's too long for the main chapters
+%%
+%% TIPS:
+%% - Only include essential code that supports your thesis
+%% - Add comments explaining what each section does
+%% - Consider linking to a GitHub repository instead of including all code
+%% - Format code consistently
+%%
+
+\chapter{Source Code}
+\label{app:code}
+
+
+\section{[Module/Component Name]}
+\label{sec:app_module1}
+
+% ═══════════════════════════════════════════════════════════════════════════
+% EXAMPLE: Complete class or module listing
+% ═══════════════════════════════════════════════════════════════════════════
+
+\begin{lstlisting}[language=Python, caption={[Descriptive Name]}, label={lst:app_code1}]
+"""
+Module: [module_name].py
+Purpose: [Brief description of what this code does]
+Author: [Your Name]
+"""
+
+class ExampleClass:
+    """
+    A sample class demonstrating the implementation.
+    
+    Attributes:
+        attribute1: Description of first attribute
+        attribute2: Description of second attribute
+    """
+    
+    def __init__(self, param1, param2):
+        """Initialize the class with given parameters."""
+        self.attribute1 = param1
+        self.attribute2 = param2
+    
+    def method_one(self, input_data):
+        """
+        Process the input data.
+        
+        Args:
+            input_data: The data to process
+            
+        Returns:
+            Processed result
+        """
+        # Implementation here
+        result = self._helper_method(input_data)
+        return result
+    
+    def _helper_method(self, data):
+        """Private helper method."""
+        # Helper implementation
+        return data
+\end{lstlisting}
+
+
+\section{[Another Module/Component]}
+\label{sec:app_module2}
+
+\begin{lstlisting}[language=Java, caption={[Descriptive Name]}, label={lst:app_code2}]
+/**
+ * Class: ExampleService.java
+ * Purpose: [Brief description]
+ * @author [Your Name]
+ */
+public class ExampleService {
+    
+    private final Repository repository;
+    
+    public ExampleService(Repository repository) {
+        this.repository = repository;
+    }
+    
+    /**
+     * Main processing method.
+     * @param id The entity ID to process
+     * @return The processed result
+     */
+    public Result process(Long id) {
+        Entity entity = repository.findById(id);
+        // Processing logic here
+        return new Result(entity);
+    }
+}
+\end{lstlisting}
+
+
+\section{Configuration Files}
+\label{sec:app_config}
+
+% ═══════════════════════════════════════════════════════════════════════════
+% EXAMPLE: Configuration file
+% ═══════════════════════════════════════════════════════════════════════════
+
+\begin{lstlisting}[language=Python, caption={Configuration Settings}, label={lst:app_config}]
+# config.py - Application configuration
+
+# Database settings
+DATABASE = {
+    'host': 'localhost',
+    'port': 5432,
+    'name': 'myapp_db',
+    'user': 'app_user'
+}
+
+# API settings
+API_CONFIG = {
+    'base_url': 'https://api.example.com',
+    'timeout': 30,
+    'retry_count': 3
+}
+
+# Feature flags
+FEATURES = {
+    'enable_caching': True,
+    'debug_mode': False,
+    'max_items': 100
+}
+\end{lstlisting}
+
+
+\section{Database Schema}
+\label{sec:app_schema}
+
+% ═══════════════════════════════════════════════════════════════════════════
+% EXAMPLE: SQL schema
+% ═══════════════════════════════════════════════════════════════════════════
+
+\begin{lstlisting}[language=SQL, caption={Database Schema}, label={lst:app_schema}]
+-- Database schema for [Your Application]
+
+CREATE TABLE users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    email VARCHAR(100) UNIQUE NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE items (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES users(id),
+    title VARCHAR(200) NOT NULL,
+    description TEXT,
+    status VARCHAR(20) DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_items_user_id ON items(user_id);
+\end{lstlisting}
+
+% TIP: Add more sections as needed for your code
+% TIP: Only include code that's directly relevant to your thesis

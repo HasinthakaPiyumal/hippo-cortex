@@ -1,0 +1,34 @@
+# latexmkrc - Configuration for latexmk
+# 
+# Usage: latexmk -pdf thesis.tex
+# Or just: latexmk (will use thesis.tex by default)
+
+# Use pdflatex
+$pdf_mode = 1;
+$pdflatex = 'pdflatex -interaction=nonstopmode -synctex=1 %O %S';
+
+# Use bibtex for bibliography
+$bibtex_use = 2;
+
+# Default file to compile
+@default_files = ('thesis.tex');
+
+# Clean up auxiliary files
+$clean_ext = 'aux bbl blg brf idx ilg ind lof log lot out toc synctex.gz fdb_latexmk fls nav snm vrb';
+
+# Ensure glossaries are built (if used)
+# add_cus_dep('glo', 'gls', 0, 'run_makeglossaries');
+# add_cus_dep('acn', 'acr', 0, 'run_makeglossaries');
+
+# sub run_makeglossaries {
+#     system("makeglossaries $_[0]");
+# }
+
+# Number of runs (usually 2-3 is enough)
+$max_repeat = 5;
+
+# Preview settings (optional)
+# $preview_continuous_mode = 1;
+# $pdf_previewer = 'start acroread';  # Windows
+# $pdf_previewer = 'open -a Preview'; # macOS
+# $pdf_previewer = 'evince';          # Linux

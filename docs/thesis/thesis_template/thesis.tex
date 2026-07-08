@@ -1,0 +1,104 @@
+%% thesis.tex
+%% University of Kelaniya BSc Honours Thesis - Main Document
+%% 
+%% ╔════════════════════════════════════════════════════════════════════════════╗
+%% ║  HOW TO USE THIS TEMPLATE                                                  ║
+%% ║  1. Update the thesis information below with YOUR details                  ║
+%% ║  2. Edit chapter files in the chapters/ folder                             ║
+%% ║  3. Add your references to references/references.bib                       ║
+%% ║  4. Compile: pdflatex thesis -> bibtex thesis -> pdflatex thesis (x2)      ║
+%% ║  For Overleaf: Upload this folder as ZIP and click Recompile               ║
+%% ╚════════════════════════════════════════════════════════════════════════════╝
+
+\documentclass[final,onehalfspacing]{uokthesis}
+
+%% ============================================================================
+%% THESIS INFORMATION - ⚠️ REPLACE ALL VALUES BELOW WITH YOUR DETAILS
+%% ============================================================================
+
+\thesistitle{HippoCortex: Biologically-Inspired Continual Learning via Sharp Wave Ripple Generative Replay in State Space Models}
+
+\groupnumber{Group 07}
+\studentone{Hasinthaka Piyumal}{SE/2021/036}{Research Lead}
+\studenttwo{Praveen Dedigama}{SE/2021/031}{Lead Developer}
+\studentthree{Induwara Mihisara}{SE/2021/025}{Project Manager}
+\studentfour{Thagya Kavindi}{SE/2021/062}{Documentations Lead}
+
+\degree{Bachelor of Science Honours in Software Engineering}
+\faculty{Faculty of Science}
+\department{Software Engineering Teaching Unit}
+\academicyear{2025/2026}
+
+\supervisorname{Dr. Nalin Warnajith}
+\supervisortitle{Senior Lecturer}
+\supervisordetails{
+    &   & Software Engineering Teaching Unit,\\
+    &   & Faculty of Science,\\
+    &   & University of Kelaniya,\\
+    &   & Sri Lanka
+}
+
+\submissiondate{July 2026}
+
+%% ============================================================================
+%% ADDITIONAL PACKAGES (uncomment or add packages you need)
+%% ============================================================================
+
+% \usepackage{tikz}           % For drawing diagrams
+% \usepackage{pgfplots}       % For charts and plots
+% \usepackage{siunitx}        % For SI units
+
+%% ============================================================================
+%% CUSTOM COMMANDS (define your own shortcuts)
+%% ============================================================================
+
+\newcommand{\bigO}[1]{\ensuremath{\mathcal{O}(#1)}}  % Big-O notation: \bigO{n}
+\newcommand{\code}[1]{\texttt{#1}}                   % Inline code: \code{main()}
+
+%% ============================================================================
+%% DOCUMENT STRUCTURE - Usually no changes needed below
+%% ============================================================================
+
+\begin{document}
+
+% Title Page
+\maketitlepage
+
+% Front Matter (Roman numerals)
+\frontmatter
+\makedeclaration
+\input{frontmatter/acknowledgement}
+\input{frontmatter/abstract}
+\tableofcontents
+\clearpage
+\listoffigures
+\addcontentsline{toc}{chapter}{List of Figures}
+\clearpage
+\listoftables
+\addcontentsline{toc}{chapter}{List of Tables}
+\clearpage
+\listofalgorithms
+\addcontentsline{toc}{chapter}{List of Algorithms}
+\clearpage
+\input{frontmatter/abbreviations}
+
+% Main Matter (Arabic numerals)
+\mainmatter
+\input{chapters/chapter01/chapter01}
+\input{chapters/chapter02/chapter02}
+\input{chapters/chapter03/chapter03}
+\input{chapters/chapter04/chapter04}
+\input{chapters/chapter05/chapter05}
+
+% Back Matter
+\backmatter
+\bibliographystyle{ieeetr}
+\bibliography{references/references}
+\addcontentsline{toc}{chapter}{Bibliography}
+
+\begin{appendices}
+\input{appendices/appendixA}
+\input{appendices/appendixB}
+\end{appendices}
+
+\end{document}

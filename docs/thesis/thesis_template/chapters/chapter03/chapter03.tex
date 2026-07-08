@@ -1,0 +1,152 @@
+%% chapters/chapter03/chapter03.tex
+%% CHAPTER 3: METHODOLOGY
+
+\chapterfigpath{chapter03}
+
+\chapter{Methodology}
+\label{chap:methodology}
+
+
+\section{Research Design}
+\label{sec:research_design}
+
+This research employs a systematic methodology to achieve the stated objectives. The study follows a structured approach combining design, implementation, and evaluation phases.
+
+\subsection{Research Approach}
+\label{subsec:research_approach}
+
+The research methodology consists of the following phases:
+
+\begin{enumerate}
+    \item \textbf{Phase 1 - Analysis:} Review existing solutions and identify requirements
+    \item \textbf{Phase 2 - Design:} Develop the system architecture and design
+    \item \textbf{Phase 3 - Implementation:} Build the proposed solution
+    \item \textbf{Phase 4 - Evaluation:} Test and validate the implementation
+\end{enumerate}
+
+
+\section{Development Environment}
+\label{sec:development_environment}
+
+\subsection{Hardware Specifications}
+\label{subsec:hardware}
+
+Table~\ref{tab:hardware} lists the hardware used for development and testing.
+
+\input{chapters/chapter03/tables/hardware}
+
+\subsection{Software Tools}
+\label{subsec:software}
+
+The following software tools were used:
+
+\begin{itemize}
+    \item \textbf{IDE:} Visual Studio Code - For code development
+    \item \textbf{Programming Language:} Python 3.10 - Primary language
+    \item \textbf{Framework:} Django 4.0 - Web framework
+    \item \textbf{Database:} PostgreSQL 14 - Data storage
+    \item \textbf{Version Control:} Git/GitHub - Code management
+\end{itemize}
+
+
+\section{System Architecture}
+\label{sec:system_architecture}
+
+Figure~\ref{fig:system_architecture} presents the overall system architecture.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.8\textwidth]{system_architecture}
+    \caption{System architecture showing main components and their interactions}
+    \label{fig:system_architecture}
+\end{figure}
+
+\subsection{Component 1: Data Layer}
+\label{subsec:data_layer}
+
+Describe what this component does and how it works. The data layer handles all database operations and data persistence.
+
+\subsection{Component 2: Business Logic Layer}
+\label{subsec:business_layer}
+
+Describe the second main component. The business logic layer contains the core algorithms and processing logic.
+
+\subsection{Component 3: Presentation Layer}
+\label{subsec:presentation_layer}
+
+Describe the user interface component. The presentation layer handles user interactions and displays results.
+
+
+\section{Implementation}
+\label{sec:implementation}
+
+Figure~\ref{fig:development_workflow} illustrates the development workflow adopted in this project.
+
+\begin{figure}[ht]
+    \centering
+    \includegraphics[width=0.7\textwidth]{development_workflow}
+    \caption{Development workflow showing the iterative process}
+    \label{fig:development_workflow}
+\end{figure}
+
+Listing~\ref{lst:python_example} shows an example implementation.
+
+\begin{lstlisting}[language=Python, caption={Example Python implementation}, label={lst:python_example}]
+def process_data(input_data, threshold=0.5):
+    """
+    Process input data and return filtered results.
+    
+    Args:
+        input_data: List of data points
+        threshold: Minimum value to include
+        
+    Returns:
+        List of filtered results
+    """
+    results = []
+    for item in input_data:
+        if item.value > threshold:
+            processed = transform(item)
+            results.append(processed)
+    return results
+\end{lstlisting}
+
+
+\section{Data Collection}
+\label{sec:data_collection}
+
+\subsection{Data Sources}
+\label{subsec:data_sources}
+
+Describe where your data comes from - datasets, APIs, surveys, etc.
+
+\subsection{Data Preprocessing}
+\label{subsec:preprocessing}
+
+Explain any cleaning, transformation, or preparation of data.
+
+
+\section{Testing and Evaluation Strategy}
+\label{sec:testing_strategy}
+
+\subsection{Evaluation Metrics}
+\label{subsec:metrics}
+
+The following metrics will be used to evaluate the system:
+
+\begin{itemize}
+    \item \textbf{Accuracy:} Percentage of correct predictions
+    \item \textbf{Response Time:} Average processing time in milliseconds
+    \item \textbf{User Satisfaction:} Survey score out of 5
+\end{itemize}
+
+\subsection{Testing Approach}
+\label{subsec:testing_approach}
+
+Describe your testing methodology - unit tests, integration tests, user testing, etc.
+
+
+\section{Chapter Summary}
+\label{sec:methodology_summary}
+
+This chapter described the research methodology including the research design, development environment, system architecture, and evaluation strategy. The implementation uses modern technologies to achieve the stated objectives. The evaluation strategy employs multiple metrics to measure success.
