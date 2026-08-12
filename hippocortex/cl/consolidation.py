@@ -21,8 +21,12 @@ import torch
 from torch import Tensor
 from torch.optim import Optimizer
 
-from hippocortex.models.backbone import MambaBackbone
-from hippocortex.models.swr_generator import SWRGenerator
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from hippocortex.models.backbone import MambaBackbone
+    from hippocortex.models.swr_generator import SWRGenerator
+
 from hippocortex.cl.stats_buffer import StatsBuffer
 from hippocortex.cl.null_space_projector import NullSpaceProjector
 
