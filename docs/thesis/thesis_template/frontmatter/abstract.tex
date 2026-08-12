@@ -20,27 +20,14 @@
 
 \begin{abstract}
 
-% ⚠️ REPLACE THIS SAMPLE TEXT WITH YOUR OWN ABSTRACT
+Continual learning is essential for deploying autonomous agents in dynamic environments, yet standard deep learning architectures suffer from catastrophic forgetting when learning tasks sequentially. Conventional approaches typically require storing raw historical data, which introduces privacy and storage constraints, or rely on parameter-regularization techniques that inherently restrict network plasticity. Inspired by the mammalian brain's memory consolidation mechanism, this thesis introduces HippoCortex, a biologically grounded, exemplar-free continual learning framework built on selective State Space Models (SSMs). 
 
-% Background (why is this important?)
-[Your research area] is an important field because [reason]. Understanding [specific aspect] is crucial for [application/benefit].
+HippoCortex mimics the hippocampal dual-memory consolidation process by pairing a selective Mamba backbone with a generative sleep-wake replay system. Instead of saving raw input images, the framework stores only the compact first- and second-order statistics ($\mu$, $\sigma^2$) of internal activations for each task. During consolidation, a task-conditioned Conditional Variational Autoencoder (CVAE) acts as a sharp wave ripple generator, sampling synthetic past hidden states from these statistics. To prevent interference between new learning and replayed memories, parameter updates are filtered through a null-space projector that constrains gradient steps to directions orthogonal to the feature subspaces of previous tasks. 
 
-% Problem (what problem are you solving?)
-However, current approaches face challenges including [challenge 1], [challenge 2], and [challenge 3]. This research addresses the problem of [specific problem statement].
-
-% Methodology (how did you approach it?)
-This study employs [methodology type, e.g., experimental/analytical/simulation-based] approach to investigate [what you investigated]. The research implements [tool/technique/method] using [technology/platform] and evaluates performance through [evaluation method].
-
-% Results (what did you find?)
-Experimental results demonstrate that [key finding 1]. Furthermore, [key finding 2]. The proposed approach achieves [quantitative result, e.g., X\% improvement] compared to [baseline/existing methods].
-
-% Conclusion (what does it mean?)
-These findings suggest that [implication of results]. The contributions of this research provide [benefit to the field/practitioners].
+We evaluate HippoCortex on challenging class-incremental benchmarks, including Split-CIFAR100 (configured as both 10-task and 20-task streams) and ImageNet-R. The proposed framework demonstrates superior stability-plasticity trade-offs, outperforming state-of-the-art SSM-based baselines like Mamba-CL and Inf-SSM in accuracy while maintaining a constant memory footprint per task. These findings validate the viability of leveraging biological memory consolidation principles to enable resource-efficient, lifelong learning in edge-device robotics.
 
 \vspace{0.5cm}
 
-\textbf{Keywords:} Keyword One, Keyword Two, Keyword Three, Keyword Four, Keyword Five
-
-% TIP: Choose keywords that someone might search for to find your research
+\textbf{Keywords:} Continual Learning, State Space Models, Mamba, Generative Replay, Null-Space Projection, Brain-Inspired AI, Edge Robotics
 
 \end{abstract}

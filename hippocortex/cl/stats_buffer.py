@@ -3,9 +3,9 @@ StatsBuffer — per-task compact memory store.
 
 OWNER: Hasinthaka Piyumal
 
-This is the core paper claim: memory grows as O(T × d_model) regardless of
+This is the core paper claim: memory grows as O(T x d_model) regardless of
 how many samples were seen. For T=20 tasks and d_model=128 float32, total
-footprint is 20 × 128 × 2 × 4 = 20 KB.
+footprint is 20 x 128 x 2 x 4 = 20 KB.
 
 Implementation notes:
 - update() receives a batch of real hidden states for a completed task,

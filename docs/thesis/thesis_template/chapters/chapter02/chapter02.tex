@@ -6,85 +6,190 @@
 \chapter{Literature Review}
 \label{chap:literature_review}
 
-
 \section{Overview}
 \label{sec:overview}
 
-This chapter reviews the existing literature related to the research topic. The review is organized thematically to provide a comprehensive understanding of the current state of knowledge.
+Continual learning (CL) represents a fundamental challenge in artificial intelligence: how can a neural network learn a sequence of tasks over time without erasing previously acquired knowledge? In classical connectionist architectures, updating weights to minimize loss on a new task invariably overwrites the representations configured for older tasks. This failure mode, known as catastrophic forgetting, arises because standard backpropagation assumes an independent and identically distributed (i.i.d.) data distribution---an assumption that is systematically violated in real-world scenarios, particularly in edge robotics.
 
-Figure~\ref{fig:literature_taxonomy} presents a taxonomy of the literature reviewed in this chapter.
+To position this research within the broader machine learning landscape, this chapter reviews the key literature across three primary axes:
+\begin{enumerate}
+    \item \textbf{Continual Learning Paradigms:} Reviewing the traditional strategies (regularization, replay, and parameter isolation) used to combat catastrophic forgetting.
+    \item \textbf{State Space Models (SSMs):} Analyzing the mathematical foundation of linear and selective state-space layers, focusing on their computational efficiency and sequence modeling advantages.
+    \item \textbf{Orthogonal Gradient Projection:} Examining techniques that restrict parameter updates to the null-spaces of prior task activations to prevent interference.
+\end{enumerate}
+
+Figure~\ref{fig:literature_taxonomy} presents the taxonomy of the literature reviewed in this chapter, mapping the relationships between these thematic areas and identifying the conceptual foundations of HippoCortex.
 
 \begin{figure}[ht]
     \centering
-    \includegraphics[width=0.75\textwidth]{literature_taxonomy}
-    \caption{Taxonomy of literature reviewed showing main themes and their relationships}
+    \input{chapters/chapter02/figures/literature_taxonomy}
+    \caption{Taxonomy of literature reviewed, categorizing the three core research pillars: continual learning paradigms, state space sequence modeling, and orthogonal gradient projection techniques.}
     \label{fig:literature_taxonomy}
 \end{figure}
-
 
 \section{Theoretical Foundations}
 \label{sec:theoretical_foundations}
 
-Discuss the theoretical foundations relevant to your research. This section should cover fundamental concepts, theories, and models.
+To understand the mechanics of continual learning in sequence models, it is essential to establish the mathematical foundations of both State Space Models (SSMs) and the continual learning problem.
 
-A fundamental equation in this field is:
-
+\subsection{State Space Models and Discretization}
+Modern State Space Models (SSMs) \cite{guEfficientlyModelingLong2022} formulate sequence modeling as a continuous-time linear dynamical system that maps a 1D input signal $x(t) \in \mathbb{R}$ to a output signal $y(t) \in \mathbb{R}$ through an $N$-dimensional latent state $h(t) \in \mathbb{R}^N$. This continuous system is represented by the following ordinary differential equations:
 \begin{equation}
-    f(x) = ax^2 + bx + c
-    \label{eq:example_equation}
+    h'(t) = A h(t) + B x(t)
+    \label{eq:ssm_continuous_state}
 \end{equation}
+\begin{equation}
+    y(t) = C h(t) + D x(t)
+    \label{eq:ssm_continuous_output}
+\end{equation}
+where $A \in \mathbb{R}^{N \times N}$ is the state transition matrix (often parameterized as a diagonal or structured matrix to ensure stability and efficiency), $B \in \mathbb{R}^{N \times 1}$ is the input matrix, $C \in \mathbb{R}^{1 \times N}$ is the output projection matrix, and $D \in \mathbb{R}$ is a direct feedthrough term (typically set to zero or bypassed in deep learning blocks).
 
-where $a$, $b$, and $c$ are constants, and $x$ is the input variable.
+To process discrete sequence inputs $x = (x_0, x_1, \dots)$, the continuous-time system must be discretized. The zero-order hold (ZOH) method is the standard discretization approach used in models like S4 \cite{guEfficientlyModelingLong2022}, Mamba \cite{guMambaLinearTimeSequence2024}, and diagonal state-space variants such as DSS \cite{guptaDiagonalStateSpaces} and S4D \cite{guParameterizationInitializationDiagonal}. Whereas the original S4 model uses a complex diagonal-plus-low-rank structure for the state transition matrix $A$, DSS and S4D simplify this formulation by restricting $A$ to be purely diagonal. This purely diagonal parameterization simplifies system initialization, reduces mathematical complexity, and accelerates the sequential unrolling of states. Given a step size (or sampling rate) $\Delta > 0$, the continuous matrices $A$ and $B$ are converted into discrete counterparts $\bar{A}$ and $\bar{B}$:
+\begin{equation}
+    \bar{A} = \exp(\Delta A)
+    \label{eq:zoh_a}
+\end{equation}
+\begin{equation}
+    \bar{B} = (\Delta A)^{-1}(\exp(\Delta A) - I) \cdot \Delta B
+    \label{eq:zoh_b}
+\end{equation}
+The discrete recurrence relations are then defined as:
+\begin{equation}
+    h_k = \bar{A} h_{k-1} + \bar{B} x_k
+    \label{eq:ssm_discrete_rec}
+\end{equation}
+\begin{equation}
+    y_k = C h_k
+    \label{eq:ssm_discrete_out}
+\end{equation}
+Equation~\ref{eq:ssm_discrete_rec} can be unrolled recurrently, enabling linear-time $\mathcal{O}(L)$ inference \cite{guMambaLinearTimeSequence2024}, or expanded as a global convolution over the sequence length $L$, enabling parallelizable $\mathcal{O}(L \log L)$ training \cite{guEfficientlyModelingLong2022}.
 
+\subsection{The Selective Mechanism in Mamba}
+While structured SSMs like S4 successfully handle long-range sequences, they are time-invariant: the discretized matrices $\bar{A}$ and $\bar{B}$ remain constant across all time steps $k$. This prevents structured SSMs from performing content-based filtering or focusing on specific segments of the input sequence.
+
+Mamba \cite{guMambaLinearTimeSequence2024} addresses this limitation by introducing a \textit{selective mechanism} where the step size $\Delta$, the input matrix $B$, and the output matrix $C$ are parameterized as functions of the input token $x_k$:
+\begin{equation}
+    B_k = s_B(x_k), \quad C_k = s_C(x_k), \quad \Delta_k = \tau_{\Delta}(\text{Parameter} + s_{\Delta}(x_k))
+    \label{eq:mamba_selectivity}
+\end{equation}
+where $s_B$, $s_C$, and $s_{\Delta}$ are linear projection layers, and $\tau_{\Delta}$ is an activation function (typically Softplus). Because these matrices vary with each time step, the system becomes time-variant, which prevents training via global convolutions. Consequently, since the discretization matrices are dynamically parameterized as functions of the input token $x_k$, the recurrent unrolling acts as a non-linear mapping from the input sequence to the hidden states, even though the state recurrence equation itself remains linear with respect to the state vector $h_k$. To retain parallel training capability, Mamba uses a hardware-aware parallel associative scan algorithm \cite{guMambaLinearTimeSequence2024}, maintaining high computational throughput while enabling selective sequence representations.
+
+\subsection{Continual Learning and the Stability-Plasticity Dilemma}
+In a continual learning stream \cite{wangComprehensiveSurveyContinual2024}, a model is trained on a sequence of tasks $\mathcal{T} = \{T_0, T_1, \dots, T_{K-1}\}$. Each task $T_t$ provides a dataset $D_t = \{(x_i^t, y_i^t)\}$. The objective is to optimize the parameters $\theta$ of a model $f_\theta$ to perform well on all tasks seen so far:
+\begin{equation}
+    \min_\theta \sum_{i=0}^{t} \mathbb{E}_{(x, y) \sim D_i} \left[ \mathcal{L}(f_\theta(x), y) \right]
+    \label{eq:cl_objective}
+\end{equation}
+without having access to the training datasets $D_i$ for $i < t$. The core challenge is the stability-plasticity dilemma: the model must retain sufficient plasticity to acquire new knowledge from $D_t$ while maintaining stability to protect old task parameters from being overwritten. 
+
+In class-incremental learning (CIL) \cite{venThreeScenariosContinual2019}, the setting evaluated in this study, the task identity is not provided at test time, requiring the model to classify inputs across all classes learned so far. This is significantly more challenging than task-incremental learning \cite{venThreeScenariosContinual2019}, as the output heads face severe logit drift and inter-task interference.
 
 \section{Existing Approaches}
 \label{sec:existing_approaches}
 
-Table~\ref{tab:approach_comparison} compares different approaches found in the literature.
+Existing continual learning methodologies can be broadly divided into three paradigms: regularization, parameter isolation, and replay. Table~\ref{tab:approach_comparison} summarizes and compares these approaches along dimensions key to edge robotics.
 
 \input{chapters/chapter02/tables/approach_comparison}
 
+\subsection{Regularization-Based Methods}
+Regularization-based methods introduce a penalty term to the loss function to constrain parameter drift. Weight regularization techniques, such as Elastic Weight Consolidation (EWC) \cite{kirkpatrickOvercomingCatastrophicForgetting2017} and Synaptic Intelligence (SI) \cite{wangComprehensiveSurveyContinual2024}, estimate the importance of each parameter to past tasks and penalize changes to important weights. For instance, EWC uses the diagonal of the Fisher Information Matrix $F$ as a proxy for parameter importance, adding a quadratic penalty:
+\begin{equation}
+    \mathcal{L}_{\text{EWC}}(\theta) = \mathcal{L}_{\text{current}}(\theta) + \sum_{j} \frac{\lambda}{2} F_{j} (\theta_j - \theta_{j,\text{past}})^2
+    \label{eq:ewc_loss}
+\end{equation}
+In contrast, Synaptic Intelligence computes parameter importance online by calculating the path integral of parameter updates along the optimization trajectory, tracking how much each individual synapse contributes to the drop in training loss. While memory-efficient, regularization methods often fail in class-incremental settings because they restrict weight space updates too aggressively, limiting the network's plasticity for complex new tasks.
+
+\subsection{Exemplar and Generative Replay}
+Replay methods mitigate forgetting by interleaving old task data with current task data. Experience Replay (ER) \cite{riemer2019learning} stores a representative buffer of raw past samples (exemplars). Although highly effective, storing raw sensor frames is problematic for edge robotics due to memory constraints and privacy concerns. 
+
+Generative replay, pioneered by Deep Generative Replay (DGR) \cite{shinContinualLearningDeep2017}, bypasses raw storage by training a generative model (such as a GAN or VAE) to reconstruct past inputs. However, generating high-dimensional raw images on edge devices is computationally expensive and prone to mode collapse under style or domain shifts. Furthermore, DGR suffers from severe generator drift; because the generator is itself trained sequentially on new data and its own synthesized historical outputs, its reconstruction quality progressively degrades over tasks, leading to compounding errors in downstream tasks. HippoCortex addresses this by storing static statistics in a buffer and replaying in the latent feature space, preventing generator decay.
+
+Figure~\ref{fig:replay_comparison} compares raw experience replay, standard generative replay, and the proposed hidden-state statistics generative replay (SWR).
+
+\begin{figure}[ht]
+    \centering
+    \input{chapters/chapter02/figures/replay_comparison}
+    \caption{Conceptual comparison of replay paradigms: Experience Replay (ER) storing raw inputs, Deep Generative Replay (DGR) generating raw inputs, and the proposed HippoCortex SWR Replay storing compact hidden state statistics and generating hidden states.}
+    \label{fig:replay_comparison}
+\end{figure}
+
+\subsection{Orthogonal Gradient Projection}
+Orthogonal projection methods prevent forgetting by restricting parameter updates to directions that do not interfere with prior task representations. Gradient Projection Memory (GPM) \cite{sahaGradientProjectionMemory2021} and Null-Space Feature Covariance (NSCL) \cite{wangTrainingNetworksNull2021} perform Singular Value Decomposition (SVD) on network activations after learning a task to build an orthogonal basis $U$ of the feature space. These projection approaches have also been extended to parameter-efficient tuning methods, such as visual prompt tuning in the null space (VPT-NSP) \cite{luVisualPromptTuning}. During subsequent training, gradients $g$ are projected into the null-space of $U$:
+\begin{equation}
+    g_{\text{proj}} = g - (g U) U^\top = (I - U U^\top) g
+    \label{eq:null_space_projection}
+\end{equation}
+This mathematically guarantees that the updates do not alter the outputs of previously learned tasks \cite{sahaGradientProjectionMemory2021}. However, extending these methods to time-varying networks like Mamba requires careful selection of projection targets due to the complex, non-linear interactions of the state space.
 
 \section{Technologies and Tools}
 \label{sec:technologies}
 
-Discuss the technologies, frameworks, or tools relevant to your research. This section provides context for the technical decisions made in the methodology chapter.
+To move from theoretical models to deployed systems, the research leverages several core tools. The primary modeling and training are implemented in PyTorch, utilizing its automatic differentiation and linear algebra libraries (such as `torch.linalg.svd` and `torch.linalg.qr` for projector updates). The sequence backbone is built on the official Mamba implementation (`mamba-ssm`) \cite{guMambaLinearTimeSequence2024}, which compiles hardware-aware CUDA kernels for fast associative scan operations.
 
+For the Stage 2 physical quadruped robot deployment, the system integrates with the Robot Operating System (ROS2) and the Unitree Python SDK2. This middleware handles real-time sensor ingestion (lidar sweeps, depth maps, and joint states) and publishes velocity commands. To run the deep learning models on the Unitree Go2 Edu's Jetson Orin NX 16GB, the PyTorch model is converted into TensorRT or ONNX runtimes to maximize throughput within the robot's power budget.
 
 \section{Evaluation Methods}
 \label{sec:evaluation_methods}
 
-Algorithm~\ref{alg:example} shows a sample algorithm structure commonly used in this domain.
+Continual learning models are evaluated using three standard metrics that assess final accuracy, learning trajectory, and the degree of forgetting \cite{langeContinualLearningSurvey2021}.
+
+Let $a_{t,j}$ represent the classification accuracy on task $j$ after the model has completed training on task $t$. For a sequence of $T$ tasks, the metrics are defined as:
+\begin{enumerate}
+    \item \textbf{Average Accuracy (AA):} The mean performance across all tasks after final training:
+    \begin{equation}
+        AA = \frac{1}{T} \sum_{j=0}^{T-1} a_{T-1,j}
+        \label{eq:metric_aa}
+    \end{equation}
+    \item \textbf{Average Incremental Accuracy (AIA):} The average performance computed incrementally after each task is completed:
+    \begin{equation}
+        AIA = \frac{1}{T} \sum_{t=0}^{T-1} \frac{1}{t+1} \sum_{j=0}^{t} a_{t,j}
+        \label{eq:metric_aia}
+    \end{equation}
+    \item \textbf{Forgetting Measure (FM):} The average drop in performance from the peak accuracy achieved on each task:
+    \begin{equation}
+        FM = \frac{1}{T-1} \sum_{j=0}^{T-2} \max_{t \in \{j,\dots,T-2\}} (a_{t,j} - a_{T-1,j})
+        \label{eq:metric_fm}
+    \end{equation}
+\end{enumerate}
+
+Algorithm~\ref{alg:swr_consolidation} details the training flow of the HippoCortex framework, illustrating how the awake training phases and the sleep consolidation phase are structured to update the parameters.
 
 \input{chapters/chapter02/algorithms/example}
 
 \section{Related Work}
 \label{sec:related_work}
 
-Several studies have addressed similar problems:
+This section reviews the core continual learning methodologies related to the development of the HippoCortex framework. Rather than presenting isolated critiques, we discuss their methodological designs, empirical findings, and how they are integrated or corrected in our architecture.
 
-\textbf{Study by Gu \& Dao \cite{guMambaLinearTimeSequence2024}:} Briefly describe what they did and their findings. Then explain how your work differs or extends this.
+\subsection{Subspace Projection Methods: GPM and Mamba-CL}
 
-\textbf{Study by Lee et al. \cite{leeExemplarFreeContinualLearning2026}:} Another similar study and its relevance to your work.
+Gradient subspace projection restricts weight updates to parameter directions that do not interfere with prior tasks. Saha et al. \cite{sahaGradientProjectionMemory2021} introduced Gradient Projection Memory (GPM) as an exemplar-free continual learning method for feed-forward and convolutional layers. The methodology uses Singular Value Decomposition (SVD) on network activations after each task to identify the principal feature directions, forming an orthogonal basis of the gradient subspace. During subsequent training, gradients are projected into the null-space of these stored bases. GPM demonstrated strong empirical results on Split-CIFAR100 without storing raw data. However, as the number of tasks grows, the cumulative rank of the projection subspace increases, restricting the available parameter dimensions for learning new tasks and leading to severe plasticity decay. HippoCortex adapts GPM's null-space projection, but extends it from simple feed-forward layers to the sequential, time-varying recurrent parameters of Mamba.
 
-\textbf{Study by Cheng et al. \cite{chengMambaCLOptimizingSelective2025}:} Continue with more related work.
+To apply projection constraints to selective State Space Models, Cheng et al. \cite{chengMambaCLOptimizingSelective2025} proposed Mamba-CL. The authors derived consistency conditions for the discretization step ($\delta$), input/output projections ($W_B, W_C$), and state transitions ($A$). While Mamba-CL achieved low forgetting measures on Split-CIFAR100 and ImageNet-R \cite{hendrycksManyFacesRobustness2021}, its design introduces structural simplifications that abstract away key time-varying dynamics. Specifically, Mamba-CL assumes a global LTI convolution kernel $Y = X * K$ to derive weight constraints. While mathematically convenient, this formulation abstracts away Mamba's input-dependent selectivity, as its parameters vary dynamically along the sequence. Furthermore, projecting gradients of the transition matrix $A$ within the null space of the step-size covariance $Q = \delta_t^\top \delta_t$ faces a dimensional boundary constraint. Since $\delta_t \in \mathbb{R}^{L \times 1}$, the covariance is a $1 \times 1$ scalar whose SVD yields an empty null-space, which effectively prevents parameter $A$ from updating during training. Additionally, the online computation of covariance matrices on-board incurs a substantial 3.23\,GB VRAM overhead. HippoCortex builds upon the projection paradigm of Mamba-CL but refines the projection targets to account for time-varying parameter behavior. To address the computational footprint, it introduces a decoupled sleep-wake consolidation mechanism, deferring the SVD calculations to a background sleep phase.
 
+\subsection{Observability Regularization: Inf-SSM}
+
+Instead of restricting parameter updates directly, regularization-based approaches constrain the dynamics of the state representations. Lee et al. \cite{leeExemplarFreeContinualLearning2026} proposed Inf-SSM, which regularizes the infinite-horizon state evolution of structured SSMs. The methodology maps the extended observability subspace of the model onto the Grassmann manifold and minimizes the chordal distance between tasks. By exploiting diagonal state structures, they solved the associated Sylvester matrix equation with a reduced $\mathcal{O}(n^2)$ complexity, demonstrating strong forgetting prevention on ImageNet-R without rehearsal buffers. However, the geometric solver assumes a diagonal, time-invariant state matrix $A$, which is inapplicable to selective, time-varying networks like Mamba. While HippoCortex does not use Inf-SSM's Grassmanian solver, the concept of regularizing internal sequence dynamics motivates our design. We apply this by performing generative replay in the latent hidden state space ($H_t$) rather than the raw pixel space.
+
+\subsection{Generative Replay: DGR and CVAE}
+
+Replay-based continual learning avoids parameter constraints by interleaving past task distributions with new training data. Deep Generative Replay (DGR), proposed by Shin et al. \cite{shinContinualLearningDeep2017}, uses a cooperative generator-solver framework where a generator learns to reconstruct past inputs. This method successfully mitigates catastrophic forgetting without storing raw exemplars. However, generating high-dimensional raw pixel images on edge hardware is slow, computationally expensive, and vulnerable to mode collapse under domain shifts. HippoCortex adapts this generative replay paradigm but shifts the generation target. Instead of raw pixels, we replay in the low-dimensional latent hidden state space of the sequence model, minimizing complexity and avoiding mode collapse on edge devices.
+
+To implement hidden state generation, we leverage Conditional Variational Autoencoders (CVAEs) \cite{sohnLearningStructuredOutput2015}. CVAEs model complex structured outputs conditioned on task labels by optimizing the Evidence Lower Bound (ELBO) loss. In HippoCortex, the CVAE is trained on latent representations during the sleep phase. During consolidation, the model draws latent samples from class-specific statistics ($\mu_t, \sigma_t^2$) stored in a compact stats buffer and decodes them to synthesize hidden representations of past tasks, simulating biological memory consolidation.
 
 \section{Research Gap}
 \label{sec:research_gap}
 
-While existing literature provides extensive coverage of this topic, there are gaps in:
-
+Despite recent progress in adapting continual learning to state space models, several critical gaps remain:
 \begin{enumerate}
-    \item Gap 1 - What hasn't been done that you will do
-    \item Gap 2 - What limitation in existing work you will address
-    \item Gap 3 - What new perspective or approach you will bring
+    \item \textbf{Lack of Integrated Replay in SSMs:} Existing state-space continual learning methods (like Inf-SSM and Mamba-CL) rely entirely on regularization or projection. In complex, long-sequence class-incremental task streams, projection-only methods suffer from rank saturation, while regularization-only methods struggle to prevent representation drift. Integrating a raw-data-free replay mechanism is essential to support these methods.
+    \item \textbf{High Computational Overhead of Generative Replay:} Traditional generative replay frameworks (like DGR) generate high-dimensional raw inputs, which is computationally expensive and prone to mode collapse. There is a clear need for a method that replays low-dimensional latent statistics rather than raw pixels, preserving the linear-time benefits of the underlying SSM.
+    \item \textbf{Deployment Gap on Deployed Edge Robotics:} No existing continual learning method for SSMs has been designed or validated for on-device edge robotics deployment under strict memory and power budgets.
 \end{enumerate}
 
-This research addresses these gaps by providing a comprehensive solution.
-
+This research addresses these gaps by proposing HippoCortex, which combines null-space gradient projection with a biologically-inspired Sharp Wave Ripple (SWR) hidden state generative replay.
 
 \section{Chapter Summary}
 \label{sec:lit_review_summary}
 
-This chapter reviewed the main areas of literature relevant to this research. Key findings include the identification of existing approaches, their limitations, and the research gap that this study aims to address. The identified research gaps motivate the methodology presented in the following chapter.
+Synthesizing these distinct theoretical threads reveals that while state space models offer compelling sequence modeling benefits, their adaptation to continual learning settings requires carefully balancing representation plasticity and parameter stability. Subspace projection and observability regularization provide a robust mathematical foundation for freezing critical features, yet they remain vulnerable to rank saturation and high memory overhead on edge hardware. By shifting the generative replay target from raw pixel space to the low-dimensional hidden state representations of Mamba, we can establish an efficient, constant-memory consolidation loop. This theoretical synthesis forms the basis of the HippoCortex framework, the detailed architectural design and mathematical formulation of which are developed in Chapter 3.

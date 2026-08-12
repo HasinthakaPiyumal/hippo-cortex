@@ -1,0 +1,24 @@
+\begin{table}[ht]
+    \centering
+    \caption{Misleading claims and practical limitations identified in the Mamba-CL \cite{chengMambaCLOptimizingSelective2025} paper.}
+    \label{tab:mamba_cl_misleading}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{clp{10cm}}
+        \toprule
+        \textbf{No.} & \textbf{Claim / Limitation} & \textbf{Evidence of Inaccuracy} \\
+        \midrule
+        \multicolumn{3}{l}{\textit{Misleading --- Overstated claims contradicted by evidence}} \\
+        \midrule
+        9 & \textbf{``Theoretical Guarantee'' of Zero Forgetting} & The abstract and introduction claim the method ``theoretically guarantees'' output consistency. However, the balance factor $\eta = 0.90/0.95 < 1$ immediately voids any exact guarantee, and the null-space is approximated via corner-point detection rather than exact zeros. The reported forgetting is non-zero (e.g., $4.07\%$ on 10-split ImageNet-R). \\
+        \midrule
+        10 & \textbf{Matrix Power Monotonicity Conflation} & Eq.~(12) uses ``monotonic increasing property of $[\exp(x)]^k$'' to deduce Eq.~(13). For matrices, $\bar{A}^k$ is a matrix power involving cross-dimensional products where scalar monotonicity does not apply. This step is valid only because Mamba's $A$ is diagonal, but this assumption is never stated. \\
+        \midrule
+        11 & \textbf{Ablation Contradicts $H_2$ Effectiveness} & Table~3 shows that adding $H_2$ and $H_3$ projections (without $H_{\text{out}}$) \emph{decreases} accuracy by $1.66\%$ compared to using only $H_{1,\delta}$ and $H_{1,C}$. The paper dismisses this as ``$H_2$ has relatively minor impact'' without acknowledging that $H_2 = 0$ mathematically (see Flaw~3 in Table~\ref{tab:mamba_cl_flaws}). \\
+        \midrule
+        \multicolumn{3}{l}{\textit{Practical --- Hardware deployment limitation}} \\
+        \midrule
+        12 & \textbf{Prohibitive VRAM Footprint} & Eq.~(28) computes additional memory as $2S(2D^2 + L^2)$ floats. For $D{=}2048$, $L{=}145$, $S{=}48$, this requires ${\approx}3.23$ GB of VRAM. While acceptable for cloud servers, this is prohibitive for shared-memory edge systems (e.g., Jetson Orin NX with 8/16 GB). \\
+        \bottomrule
+    \end{tabular}%
+    }
+\end{table}

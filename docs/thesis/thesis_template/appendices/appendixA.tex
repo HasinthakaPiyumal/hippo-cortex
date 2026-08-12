@@ -2,162 +2,117 @@
 %% ============================================================================
 %% APPENDIX A: SOURCE CODE
 %% ============================================================================
-%%
-%% PURPOSE: Include complete code that's too long for the main chapters
-%%
-%% TIPS:
-%% - Only include essential code that supports your thesis
-%% - Add comments explaining what each section does
-%% - Consider linking to a GitHub repository instead of including all code
-%% - Format code consistently
-%%
 
 \chapter{Source Code}
 \label{app:code}
 
+This appendix presents the core Python classes of the HippoCortex Stage 1 continual learning implementation.
 
-\section{[Module/Component Name]}
-\label{sec:app_module1}
+\section{StatsBuffer Module}
+\label{sec:app_stats_buffer}
 
-% ═══════════════════════════════════════════════════════════════════════════
-% EXAMPLE: Complete class or module listing
-% ═══════════════════════════════════════════════════════════════════════════
+The \texttt{StatsBuffer} class implements the per-task compact memory storage. It computes and stores the mean and variance of hidden states for completed tasks, ensuring that memory consumption scales strictly as $\mathcal{O}(T \times d_{\text{model}})$.
 
-\begin{lstlisting}[language=Python, caption={[Descriptive Name]}, label={lst:app_code1}]
-"""
-Module: [module_name].py
-Purpose: [Brief description of what this code does]
-Author: [Your Name]
-"""
+\begin{lstlisting}[language=Python, caption={StatsBuffer Implementation}, label={lst:app_stats_buffer_code}]
+import torch
+from torch import Tensor
 
-class ExampleClass:
-    """
-    A sample class demonstrating the implementation.
-    
-    Attributes:
-        attribute1: Description of first attribute
-        attribute2: Description of second attribute
-    """
-    
-    def __init__(self, param1, param2):
-        """Initialize the class with given parameters."""
-        self.attribute1 = param1
-        self.attribute2 = param2
-    
-    def method_one(self, input_data):
+class StatsBuffer:
+    def __init__(self) -> None:
+        self._store: dict[int, tuple[Tensor, Tensor]] = {}
+
+    def update(self, task_id: int, hidden_states: Tensor) -> None:
         """
-        Process the input data.
-        
+        Compute and store (mean, variance) for task_id.
         Args:
-            input_data: The data to process
-            
-        Returns:
-            Processed result
+            task_id: Integer task index (0-based).
+            hidden_states: Shape (N, d_model) - hidden states collected
+                           across the training set of the completed task.
         """
-        # Implementation here
-        result = self._helper_method(input_data)
-        return result
-    
-    def _helper_method(self, data):
-        """Private helper method."""
-        # Helper implementation
-        return data
+        mu = hidden_states.mean(dim=0)
+        sigma2 = hidden_states.var(dim=0, unbiased=False)
+        self._store[task_id] = (mu, sigma2)
+
+    def get_stats(self, task_id: int) -> tuple[Tensor, Tensor]:
+        """
+        Return stored (mean, variance) for task_id.
+        Returns:
+            mu:     shape (d_model,)
+            sigma2: shape (d_model,)
+        """
+        if task_id not in self._store:
+            raise KeyError(f"Task {task_id} has not been stored yet.")
+        return self._store[task_id]
+
+    def task_ids(self) -> list[int]:
+        """Return sorted list of all stored task ids."""
+        return sorted(self._store.keys())
+
+    def memory_bytes(self) -> int:
+        """
+        Return exact byte count of all stored tensors.
+        Satisfies: bytes == len(task_ids) * d_model * 2 * element_size.
+        """
+        if not self._store:
+            return 0
+        first_mu = next(iter(self._store.values()))[0]
+        d_model = first_mu.shape[0]
+        element_size = first_mu.element_size()
+        return len(self._store) * d_model * 2 * element_size
 \end{lstlisting}
 
+\section{NullSpaceProjector Module}
+\label{sec:app_null_space_projector}
 
-\section{[Another Module/Component]}
-\label{sec:app_module2}
+The \texttt{NullSpaceProjector} class implements the gradient orthogonalisation logic. It performs incremental Singular Value Decomposition (SVD) and QR orthonormalisation to maintain a projection basis, projecting gradients into the null-space of prior task activations.
 
-\begin{lstlisting}[language=Java, caption={[Descriptive Name]}, label={lst:app_code2}]
-/**
- * Class: ExampleService.java
- * Purpose: [Brief description]
- * @author [Your Name]
- */
-public class ExampleService {
-    
-    private final Repository repository;
-    
-    public ExampleService(Repository repository) {
-        this.repository = repository;
-    }
-    
-    /**
-     * Main processing method.
-     * @param id The entity ID to process
-     * @return The processed result
-     */
-    public Result process(Long id) {
-        Entity entity = repository.findById(id);
-        // Processing logic here
-        return new Result(entity);
-    }
-}
+\begin{lstlisting}[language=Python, caption={NullSpaceProjector Implementation}, label={lst:app_null_space_code}]
+import torch
+from torch import Tensor
+
+class NullSpaceProjector:
+    def __init__(self, rank_budget: int = 200) -> None:
+        """
+        Args:
+            rank_budget: Maximum number of basis vectors to retain.
+        """
+        self.rank_budget = rank_budget
+        self._U: Tensor | None = None  # shape (d_model, k), k <= rank_budget
+
+    def update(self, hidden_states: Tensor) -> None:
+        """
+        Extend the basis U with new task's feature directions.
+        Args:
+            hidden_states: Shape (N, d_model) - completed task states.
+        """
+        _, S, Vt = torch.linalg.svd(hidden_states, full_matrices=False)
+        var = S ** 2
+        cumulative_ratio = torch.cumsum(var, dim=0) / var.sum()
+        r = int((cumulative_ratio < 0.99).sum().item()) + 1
+        r = min(r, Vt.shape[0])
+        new_dirs = Vt[:r].T
+        
+        if self._U is None:
+            combined = new_dirs
+        else:
+            combined = torch.cat([self._U, new_dirs], dim=1)
+            
+        Q, _ = torch.linalg.qr(combined)
+        k_new = min(Q.shape[1], self.rank_budget)
+        self._U = Q[:, :k_new]
+
+    def project(self, grad: Tensor) -> Tensor:
+        """
+        Apply the null-space projection P = I - U @ U.T to a gradient tensor.
+        Args:
+            grad: Gradient of shape (..., d_model).
+        """
+        if self._U is None:
+            return grad
+        return grad - (grad @ self._U) @ self._U.T
+
+    @property
+    def current_rank(self) -> int:
+        """Number of basis vectors currently stored."""
+        return 0 if self._U is None else self._U.shape[1]
 \end{lstlisting}
-
-
-\section{Configuration Files}
-\label{sec:app_config}
-
-% ═══════════════════════════════════════════════════════════════════════════
-% EXAMPLE: Configuration file
-% ═══════════════════════════════════════════════════════════════════════════
-
-\begin{lstlisting}[language=Python, caption={Configuration Settings}, label={lst:app_config}]
-# config.py - Application configuration
-
-# Database settings
-DATABASE = {
-    'host': 'localhost',
-    'port': 5432,
-    'name': 'myapp_db',
-    'user': 'app_user'
-}
-
-# API settings
-API_CONFIG = {
-    'base_url': 'https://api.example.com',
-    'timeout': 30,
-    'retry_count': 3
-}
-
-# Feature flags
-FEATURES = {
-    'enable_caching': True,
-    'debug_mode': False,
-    'max_items': 100
-}
-\end{lstlisting}
-
-
-\section{Database Schema}
-\label{sec:app_schema}
-
-% ═══════════════════════════════════════════════════════════════════════════
-% EXAMPLE: SQL schema
-% ═══════════════════════════════════════════════════════════════════════════
-
-\begin{lstlisting}[language=SQL, caption={Database Schema}, label={lst:app_schema}]
--- Database schema for [Your Application]
-
-CREATE TABLE users (
-    id SERIAL PRIMARY KEY,
-    username VARCHAR(50) UNIQUE NOT NULL,
-    email VARCHAR(100) UNIQUE NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE items (
-    id SERIAL PRIMARY KEY,
-    user_id INTEGER REFERENCES users(id),
-    title VARCHAR(200) NOT NULL,
-    description TEXT,
-    status VARCHAR(20) DEFAULT 'active',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_items_user_id ON items(user_id);
-\end{lstlisting}
-
-% TIP: Add more sections as needed for your code
-% TIP: Only include code that's directly relevant to your thesis

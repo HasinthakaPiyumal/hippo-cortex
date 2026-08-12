@@ -1,14 +1,20 @@
 \begin{table}[ht]
     \centering
-    \caption{Comparison of existing approaches}
+    \caption{Comparative analysis of continual learning methodologies across memory overhead, raw data dependency, computational complexity, and suitability for edge robotic systems.}
     \label{tab:approach_comparison}
-    \begin{tabular}{@{}lccc@{}}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{lccccc}
         \toprule
-        \textbf{Approach} & \textbf{Advantage} & \textbf{Limitation} & \textbf{Reference} \\
+        \textbf{Methodology} & \textbf{Category} & \textbf{Memory Overhead} & \textbf{Raw Data Replay?} & \textbf{Computational Complexity} & \textbf{Edge Robotics Suitability} \\
         \midrule
-        Method A & Fast execution & Lower accuracy & \cite{guMambaLinearTimeSequence2024} \\
-        Method B & High accuracy & Slower speed & \cite{leeExemplarFreeContinualLearning2026} \\
-        Method C & Balanced & Complex setup & \cite{chengMambaCLOptimizingSelective2025} \\
+        EWC \cite{kirkpatrickOvercomingCatastrophicForgetting2017} & Regularization & $\mathcal{O}(P)$ (Fisher Diag) & No & $\mathcal{O}(P)$ per step & Medium (struggles with drift) \\
+        ER \cite{riemer2019learning} & Exemplar Replay & $\mathcal{O}(N_{\text{samples}} \times H \times W \times C)$ & Yes & $\mathcal{O}(B_{\text{replay}})$ forward/backward & Low (unsustainable storage) \\
+        DGR \cite{shinContinualLearningDeep2017} & Generative Replay & $\mathcal{O}(P_{\text{generator}})$ (GAN/VAE) & No & $\mathcal{O}(P_{\text{generator}})$ gen cost & Low-Medium (heavy raw generation) \\
+        GPM \cite{sahaGradientProjectionMemory2021} & Subspace Projection & $\mathcal{O}(L \times d_{\text{model}} \times k)$ & No & $\mathcal{O}(L \times d_{\text{model}}^3)$ SVD basis & Medium (lacks state alignment) \\
+        Mamba-CL \cite{chengMambaCLOptimizingSelective2025} & Null-space Projection & $\mathcal{O}(L \times d_{\text{model}} \times k)$ & No & $\mathcal{O}(d_{\text{model}}^3)$ projection & Medium-High (no replay backup) \\
+        Inf-SSM \cite{leeExemplarFreeContinualLearning2026} & Observability Regularization & $\mathcal{O}(1)$ (exemplar-free) & No & $\mathcal{O}(d_{\text{state}}^2)$ diagonal solver & High (high analytical complexity) \\
+        \textbf{HippoCortex (Ours)} & Replay + Projection & $\mathcal{O}(T \times d_{\text{model}})$ stats + VAE & \textbf{No} & $\mathcal{O}(d_{\text{model}}^3)$ SVD + VAE & \textbf{High (optimized edge constraint)} \\
         \bottomrule
-    \end{tabular}
+    \end{tabular}%
+    }
 \end{table}

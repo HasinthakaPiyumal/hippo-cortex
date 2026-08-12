@@ -1,0 +1,52 @@
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.6cm and 1.8cm,
+    box/.style={
+        draw, 
+        rectangle, 
+        rounded corners=6pt, 
+        minimum width=2.5cm, 
+        minimum height=1.2cm, 
+        align=center, 
+        thick,
+        font=\sffamily\small
+    },
+    inputbox/.style={box, fill=gray!5, draw=gray!50},
+    mambabox/.style={box, fill=blue!5, draw=blue!70!black, minimum width=2.8cm},
+    bufferbox/.style={box, fill=orange!5, draw=orange!70!black},
+    cvaebox/.style={box, fill=green!5, draw=green!70!black},
+    projectorbox/.style={box, fill=red!5, draw=red!70!black},
+    arrow/.style={-Stealth, thick, draw=gray!80},
+    labelnode/.style={font=\sffamily\scriptsize, color=gray!90!black}
+]
+
+% Nodes
+\node[inputbox] (input) {Input Task Stream\\(Sequential Tasks)};
+\node[mambabox, right=of input] (backbone) {Mamba Backbone\\(Selective SSM)};
+\node[inputbox, right=of backbone] (output) {Output Classifier\\(Prediction)};
+
+\node[projectorbox, below=of input] (projector) {Null-Space Projector\\($P = I - UU^\top$)};
+\node[bufferbox, below=of backbone] (buffer) {Stats Buffer\\($\mu_N, \sigma_N^2$)};
+\node[cvaebox, below=of output] (generator) {SWR Generator\\(CVAE Model)};
+
+% Arrows
+\draw[arrow] (input) -- (backbone);
+\draw[arrow] (backbone) -- (output);
+
+% backbone to buffer (vertical)
+\draw[arrow] (backbone) -- (buffer) 
+    node[midway, right, labelnode] {hidden states $H$};
+
+% buffer to generator (horizontal)
+\draw[arrow] (buffer) -- (generator) 
+    node[midway, above, labelnode] {sampling};
+
+% Generator to Projector (routed below to avoid any crossing)
+\draw[arrow] (generator.south) -- ++(0,-0.65) -| (projector.south) 
+    node[pos=0.25, below, labelnode] {replayed states $\hat{H}_{\text{past}}$};
+
+% Projector to Backbone (beautiful curved arrow to avoid input box corner, node placed inside path for correct position)
+\draw[arrow] (projector.north) to[out=60,in=210] node[pos=0.45, below right, labelnode, xshift=-4pt, yshift=-1pt] {projected $\nabla_{\perp}$} (backbone.west);
+
+\end{tikzpicture}%
+}

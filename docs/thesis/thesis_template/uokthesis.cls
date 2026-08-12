@@ -239,7 +239,7 @@
     
     We hereby declare that this thesis does not incorporate, without acknowledgement, any material previously submitted for a degree or diploma at any university. To the best of my knowledge and belief, it contains no material previously published or written by another person, except where due reference is made in the text.
    
-    We further affirm that artificial intelligence–based tools were used only in a limited, responsible, and transparent manner during the preparation of this thesis. These tools were employed solely for language refinement, structural suggestions, and preliminary idea exploration. All substantive content, including the conceptualization, analysis, interpretation of results, and conclusions, is entirely our own. We take full responsibility for the accuracy, originality, and integrity of the work presented herein.
+    We further affirm that artificial intelligence-based tools were used only in a limited, responsible, and transparent manner during the preparation of this thesis. These tools were employed solely for language refinement, structural suggestions, and preliminary idea exploration. All substantive content, including the conceptualization, analysis, interpretation of results, and conclusions, is entirely our own. We take full responsibility for the accuracy, originality, and integrity of the work presented herein.
     
     \vspace{0.5cm}
 

@@ -1,0 +1,39 @@
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.2cm and 1.0cm,
+    box/.style={
+        draw, 
+        rectangle, 
+        rounded corners=5pt, 
+        minimum width=2.8cm, 
+        minimum height=0.9cm, 
+        align=center, 
+        thick,
+        font=\sffamily\small
+    },
+    phasebox/.style={box, fill=blue!5, draw=blue!70!black},
+    stepbox/.style={box, fill=gray!2, draw=gray!40},
+    evalbox/.style={box, fill=green!5, draw=green!70!black},
+    arrow/.style={-Stealth, thick, draw=gray!80},
+    labelnode/.style={font=\sffamily\scriptsize, color=gray!90!black}
+]
+
+% Nodes
+\node[stepbox] (start) {Task stream input\\$D_t$};
+\node[phasebox, right=of start] (warmup) {Warmup Phase\\(Train head on $D_t$)};
+\node[phasebox, right=of warmup] (joint) {Joint Phase\\(Train with replay)};
+\node[phasebox, right=of joint] (consolidation) {Sleep Phase\\(Consolidation)};
+\node[evalbox, below=of consolidation] (eval) {Evaluation\\(AA, AIA, FM)};
+
+% Connect
+\draw[arrow] (start) -- (warmup);
+\draw[arrow] (warmup) -- (joint);
+\draw[arrow] (joint) -- (consolidation);
+\draw[arrow] (consolidation) -- (eval);
+
+% Feedback loop to next task
+\draw[arrow] (eval.west) -| (start.south)
+    node[pos=0.25, above, labelnode] {Next task $t+1$};
+
+\end{tikzpicture}%
+}

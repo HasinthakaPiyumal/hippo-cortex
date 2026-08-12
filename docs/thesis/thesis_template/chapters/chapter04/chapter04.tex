@@ -1,109 +1,75 @@
 %% chapters/chapter04/chapter04.tex
-%% CHAPTER 4: RESULTS AND ANALYSIS
+%% CHAPTER 4: PRELIMINARY RESULTS AND ANALYSIS
 
 \chapterfigpath{chapter04}
 
-\chapter{Results and Analysis}
+\chapter{Preliminary Results and Analysis}
 \label{chap:results}
-
 
 \section{Overview of Results}
 \label{sec:results_overview}
 
-This chapter presents the results of the experiments conducted to evaluate the proposed solution. A total of 100 test cases were executed across multiple scenarios.
+This chapter presents the experimental findings and preliminary results obtained during the first stage of this research. To establish a rigorous baseline for the HippoCortex framework, we executed the reproduction of the state-of-the-art \textbf{Mamba-CL} \cite{chengMambaCLOptimizingSelective2025} baseline. The model was trained on the Split-CIFAR100 benchmark \cite{venThreeScenariosContinual2019} configured as a 10-task sequential stream with 10 classes per task. 
 
+Table~\ref{tab:mamba_cl_summary} summarizes the training time, training loss, training top-1 accuracy, and class-incremental evaluation results for each task.
+
+\input{chapters/chapter04/tables/performance_results}
 
 \section{Performance Evaluation}
 \label{sec:performance_results}
 
-Table~\ref{tab:performance_results} summarizes the performance measurements obtained during testing.
+The Mamba-CL baseline was evaluated under a class-incremental continual learning setting, where the task identity is not provided during inference. This forces the model to evaluate inputs across all classes learned up to the current stage.
 
-\input{chapters/chapter04/tables/performance_results}
-
-Figure~\ref{fig:results_comparison} provides a visual comparison of the results across different test scenarios.
+Figure~\ref{fig:results_comparison} plots the average class-incremental accuracy trajectory over the 10 sequential tasks.
 
 \begin{figure}[ht]
     \centering
-    \includegraphics[width=0.7\textwidth]{results_comparison}
-    \caption{Comparison of results across test scenarios}
+    \input{chapters/chapter04/figures/mamba_cl_results_chart}
+    \caption{Average class-incremental accuracy of the Mamba-CL baseline across the 10 sequential tasks on Split-CIFAR100.}
     \label{fig:results_comparison}
 \end{figure}
 
+The baseline model achieves an initial accuracy of $97.30\%$ on Task 1, which slightly increases to $97.45\%$ after Task 2. This suggests a minor positive backward transfer or stability reinforcement. However, as the task stream progresses, a gradual decay in average accuracy is observed, dropping to $94.13\%$ at Task 3, and eventually reaching a final accuracy of $90.16\%$ at the end of Task 10. The overall accuracy degradation across the stream is $7.14\%$. 
 
-\section{Functional Testing Results}
-\label{sec:functional_results}
+Notably, the final forgetting measure (FM) is constrained to $2.18\%$. This low forgetting rate indicates that the null-space gradient projection successfully locks in representations of prior tasks, preventing catastrophic forgetting. However, the drop in overall accuracy suggests a trade-off: as the projector's null-space basis $U$ fills up, the network's plasticity is constrained, leading to lower capacity for learning subsequent tasks.
 
-\input{chapters/chapter04/tables/functional_tests}
+\section{Inter-Task Interference and Accuracy Matrix}
+\label{sec:matrix_analysis}
 
+To analyze the degree of inter-task interference, we examine the class-incremental accuracy matrix $a_{t,j}$, where $t$ is the training boundary and $j$ is the task evaluated. Table~\ref{tab:mamba_cl_matrix} lists the complete accuracy matrix recorded during the baseline run.
 
-\section{User Study Results}
-\label{sec:user_study}
+\input{chapters/chapter04/tables/mamba_cl_matrix}
 
-A user study was conducted with 30 participants. Table~\ref{tab:survey_results} shows their responses.
-
-\input{chapters/chapter04/tables/survey_results}
-
-
-\section{Comparison with Existing Solutions}
-\label{sec:comparison}
-
-Figure~\ref{fig:performance_graph} shows the performance comparison between the proposed solution and existing approaches.
-
-\begin{figure}[ht]
-    \centering
-    \includegraphics[width=0.7\textwidth]{performance_graph}
-    \caption{Performance comparison with existing solutions over time}
-    \label{fig:performance_graph}
-\end{figure}
-
-Table~\ref{tab:comparison_results} provides a detailed comparison.
-
-\input{chapters/chapter04/tables/comparison_results}
-
-\section{Statistical Analysis}
-\label{sec:statistical_analysis}
-
-A t-test was performed to compare the proposed system with existing solutions. The results showed a statistically significant difference ($t(28) = 2.45$, $p < 0.05$), indicating that the proposed approach outperforms the baseline.
-
-
-\section{Discussion}
-\label{sec:discussion}
-
-\subsection{Key Findings}
-\label{subsec:key_findings}
-
-The experimental results reveal several important findings:
-
-\begin{enumerate}
-    \item \textbf{Finding 1:} The proposed system achieved 92.5\% accuracy, exceeding the target of 90\%
-    
-    \item \textbf{Finding 2:} Response time averaged 141ms, meeting the real-time requirement
-    
-    \item \textbf{Finding 3:} User satisfaction scores indicate high acceptance of the system
-\end{enumerate}
-
-\subsection{Addressing Research Questions}
-\label{subsec:addressing_rq}
-
-\textbf{RQ1:} The first research question was addressed through the performance evaluation, which demonstrated the effectiveness of the proposed approach.
-
-\textbf{RQ2:} The second research question was answered by the comparison study, showing improvements over existing solutions.
-
-\textbf{RQ3:} The third research question was addressed through the user study, which validated the usability of the system.
-
-\subsection{Limitations of Results}
-\label{subsec:results_limitations}
-
-The results should be interpreted considering the following limitations:
-
+The matrix reveals several patterns of representation drift:
 \begin{itemize}
-    \item Limitation 1 - e.g., ``Sample size was limited to 30 participants''
-    \item Limitation 2 - e.g., ``Testing was performed only on synthetic data''
-    \item Limitation 3 - e.g., ``Results may not generalize to other domains''
+    \item \textbf{High Early Stability:} Task 1 classification accuracy remains remarkably stable, starting at $97.30\%$ and only decaying to $93.80\%$ after learning 9 additional tasks. Similarly, Task 2 accuracy drops by only $3.50\%$ (from $97.80\%$ to $94.30\%$).
+    \item \textbf{Task-Specific Vulnerability:} Certain tasks exhibit lower initial accuracies (e.g., falling below $90\%$) and experience more pronounced performance drops across the stream. This variance indicates that specific task distributions (such as tasks containing classes with high visual similarity to earlier ones) are more difficult to align within the null-space projection of prior tasks, experiencing higher immediate inter-task interference.
+    \item \textbf{Late Stream Plasticity Loss:} The initial task accuracies of later tasks in the stream (e.g., Task 8 at $91.80\%$, Task 9 at $91.80\%$, and Task 10 at $89.60\%$) are systematically lower than the initial accuracies of early tasks (Task 1 at $97.30\%$ and Task 2 at $97.80\%$). This directly supports the hypothesis of plasticity loss: as more tasks are consolidated, the rank of the gradient projection space increases, leaving fewer parameter dimensions open for acquiring new features.
 \end{itemize}
 
+\section{Computational Latency and Resource Profile}
+\label{sec:computational_profile}
+
+The Mamba-CL baseline reproduction was executed on a cloud instance from Thunder Compute consisting of an NVIDIA A6000 GPU (48GB VRAM), 32GB RAM, and 4 vCPUs. The training log records a highly consistent training latency:
+\begin{itemize}
+    \item \textbf{Average Training Time per Task:} Approximately 1 hour and 40 minutes (ranging from 01:36:10 for Task 10 to 01:40:48 for Task 8).
+    \item \textbf{Total Stream Training Time:} 16 hours, 52 minutes, and 30 seconds.
+    \item \textbf{Evaluation Latency:} Extremely low, averaging 11.8 seconds per task evaluation dataset.
+\end{itemize}
+
+While a 1.6-hour training time per task is acceptable in a cloud setting, it represents a substantial computational footprint for edge robotic platforms like the Jetson Orin NX (16GB). The intensive backward passes and orthogonal projection updates, if run continuously in an "awake" state on the robot, would quickly exceed thermal and battery constraints. This highlights the practical value of HippoCortex's proposed decoupled sleep-wake architecture: awake training should be kept lightweight, while heavier generative consolidation and projector basis updates should be deferred to a periodic offline "sleep" phase.
+
+\section{Future Implementation Objectives}
+\label{sec:future_plan}
+
+With the Mamba-CL baseline successfully reproduced and analyzed, the primary objective for subsequent stages of this research is the full implementation and benchmark validation of the HippoCortex core algorithm. The planned milestones are:
+\begin{enumerate}
+    \item \textbf{CVAE SWR Generator Integration (Month 1):} Finalize the SWR generator CVAE model implementation in the codebase (\code{swr\_generator.py}) and train it on latent statistics.
+    \item \textbf{Comparative Evaluation (Month 2):} Run the HippoCortex loop (combining SWR replay and null-space projection) on both benchmarks, comparing it to Mamba-CL and Inf-SSM. We will also test generalization by comparing the De-focus Mamba backbone against bidirectional Vision Mamba (Vim) \cite{zhuVisionMambaEfficient2024}.
+    \item \textbf{On-Device Robotic Deployment (Months 3-4):} Export the validated model to TensorRT, integrate it with ROS2 and CycloneDDS on the physical Unitree Go2 Edu quadruped, and evaluate terrain and object adaptation on-device.
+\end{enumerate}
 
 \section{Chapter Summary}
 \label{sec:results_summary}
 
-This chapter presented the results of the evaluation. Key findings include high accuracy (92.5\%), acceptable response time (141ms), and positive user feedback (4.2/5). The system achieved its main objectives while acknowledging certain limitations. These results address the research objectives outlined in Chapter 1.
+Analyzing the empirical behavior of the baseline reproduction confirms that null-space projection offers a highly effective constraint against representation drift, restricting forgetting to $2.18\%$. Nevertheless, the accompanying $7.14\%$ drop in incremental accuracy reveals the presence of plasticity decay as the projection subspace fills up over the task stream. The 17-hour training overhead under continuous online optimization demonstrates that running full projection updates in real-time is computationally impractical for autonomous edge robotics. These experimental findings directly support the architectural need for HippoCortex's decoupled sleep-wake framework, providing a clear justification for the implementation and deployment roadmap outlined in Chapter 5.

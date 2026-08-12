@@ -1,0 +1,51 @@
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.2cm and 1.0cm,
+    box/.style={
+        draw, 
+        rectangle, 
+        rounded corners=5pt, 
+        minimum width=2.8cm, 
+        minimum height=1.0cm, 
+        align=center, 
+        thick,
+        font=\sffamily\small
+    },
+    erbox/.style={box, fill=orange!5, draw=orange!70!black},
+    dgrbox/.style={box, fill=blue!5, draw=blue!70!black},
+    hcbox/.style={box, fill=green!5, draw=green!70!black},
+    compbox/.style={box, fill=gray!5, draw=gray!50, minimum width=2.5cm},
+    arrow/.style={-Stealth, thick, draw=gray!80},
+    labelnode/.style={font=\sffamily\scriptsize, color=gray!90!black}
+]
+
+% Row 1: Experience Replay (ER)
+\node[erbox] (er_title) {\textbf{Experience Replay (ER)}\\(Raw Buffer)};
+\node[compbox, right=of er_title, xshift=0.5cm] (er_store) {Store Raw Input\\$X \in \mathbb{R}^{3 \times H \times W}$};
+\node[compbox, right=of er_store, xshift=0.5cm] (er_net) {Forward Pass\\Full Network};
+\draw[arrow] (er_title) -- (er_store);
+\draw[arrow] (er_store) -- (er_net);
+
+% Row 2: Deep Generative Replay (DGR)
+\node[dgrbox, below=of er_title, yshift=-0.5cm] (dgr_title) {\textbf{Generative Replay}\\(DGR / GAN)};
+\node[compbox, right=of dgr_title, xshift=0.5cm] (dgr_store) {Generate Inputs\\$\hat{X} \approx X$};
+\node[compbox, right=of dgr_store, xshift=0.5cm] (dgr_net) {Forward Pass\\Full Network};
+\draw[arrow] (dgr_title) -- (dgr_store);
+\draw[arrow] (dgr_store) -- (dgr_net);
+
+% Row 3: HippoCortex SWR Replay
+\node[hcbox, below=of dgr_title, yshift=-0.5cm] (hc_title) {\textbf{HippoCortex}\\(SWR Replay)};
+\node[compbox, right=of hc_title, xshift=0.5cm] (hc_store) {Stats Buffer\\$(\mu, \sigma^2) \in \mathbb{R}^{d_{\text{model}}}$};
+\node[compbox, right=of hc_store, xshift=0.5cm] (hc_net) {Replay Hidden\\$\hat{H} \in \mathbb{R}^{d_{\text{model}}}$};
+\node[compbox, right=of hc_net, xshift=0.5cm] (hc_head) {Late Layers / Head\\(No Early Backbone)};
+\draw[arrow] (hc_title) -- (hc_store);
+\draw[arrow] (hc_store) -- (hc_net);
+\draw[arrow] (hc_net) -- (hc_head);
+
+% Annotation labels showing memory footprints
+\node[labelnode, above=of er_store, yshift=-0.9cm] {Memory: $O(N_{\text{samples}} \times H \times W \times C)$ (High)};
+\node[labelnode, above=of dgr_store, yshift=-0.9cm] {Memory: Generator Parameters (Medium)};
+\node[labelnode, above=of hc_store, yshift=-0.9cm] {Memory: $O(T \times d_{\text{model}})$ (Ultra-Low $\approx$ 20 KB)};
+
+\end{tikzpicture}%
+}

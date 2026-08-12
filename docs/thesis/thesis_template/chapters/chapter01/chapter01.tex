@@ -6,69 +6,71 @@
 \chapter{Introduction}
 \label{chap:introduction}
 
-
 \section{Background}
 \label{sec:background}
 
-Provide background information about your research domain. Explain the broader context and why this area is important. You might discuss the evolution of the field, current trends, or real-world applications.
+Deep neural networks excel at learning complex representations from large, stationary datasets. However, when these networks are deployed in real-world scenarios where data arrives sequentially as a stream of tasks, they face a fundamental challenge known as catastrophic forgetting \cite{kirkpatrickOvercomingCatastrophicForgetting2017}. Because standard gradient descent optimization assumes independent and identically distributed (i.i.d.) data, training a model on new information alters the weights that encode previously acquired knowledge, leading to a rapid and often complete loss of performance on older tasks. This tension between integrating new information and preserving past knowledge is known as the stability-plasticity dilemma \cite{langeContinualLearningSurvey2021}.
 
-Continue with more context. Introduce key concepts that readers need to understand your research. Use citations to support your statements \cite{guMambaLinearTimeSequence2024}.
+To mitigate catastrophic forgetting, three main families of continual learning techniques have emerged: parameter regularization, parameter isolation, and memory-based replay. Regularization-based methods, such as Elastic Weight Consolidation (EWC) \cite{kirkpatrickOvercomingCatastrophicForgetting2017}, penalize updates to weights that are deemed critical to past tasks. Parameter isolation methods allocate separate sub-networks or weights for different tasks, which can lead to parameter growth as the task stream increases. Replay-based approaches, such as Deep Generative Replay (DGR) \cite{shinContinualLearningDeep2017}, maintain or generate past data to interleave with new-task training. While effective, replaying raw high-resolution inputs in pixel space requires substantial memory and compute resources, making it impractical for resource-constrained edge devices like robotics.
 
-Figure~\ref{fig:research_framework} illustrates the overall research framework adopted in this study.
+State Space Models (SSMs), particularly the selective Mamba architecture \cite{guMambaLinearTimeSequence2024}, have recently emerged as an efficient alternative to Transformers for sequence modeling tasks. By using a hardware-aware parallel scan and input-dependent parameterization, Mamba scales linearly with sequence length while achieving high modeling capacity on sequential data. This structured recurrence and computational efficiency make Mamba highly suitable for real-time temporal tracking on resource-constrained robotic platforms. However, adapting SSMs to continual learning remains relatively unexplored, and early approaches like Mamba-CL \cite{chengMambaCLOptimizingSelective2025} and Inf-SSM \cite{leeExemplarFreeContinualLearning2026} exhibit performance degradation when faced with long task sequences.
 
-\begin{figure}[ht]
+The mammalian brain addresses the stability-plasticity dilemma through a dual-memory system. The hippocampus acts as a fast-learning encoder that rapidly stores daily experiences. During periods of offline rest or non-REM sleep, the hippocampus fires high-frequency electrical bursts known as sharp wave ripples (SWRs) \cite{buzsakiHippocampalSharpWaveripple2015}. These SWRs replay compressed representations of waking neural trajectories and transfer them to the neocortex for long-term consolidation \cite{buzsakiHippocampalSharpWaveripple2015}. 
+
+HippoCortex translates these biological principles into a trainable machine learning architecture by pairing a selective Mamba backbone with a decoupled sleep-wake replay mechanism. Rather than retaining raw, high-dimensional input pixels, the framework records only the low-dimensional statistical summaries (mean and variance) of the final hidden activations for each task, ensuring a constant memory footprint. The interaction between these components across the training phases is illustrated in Figure 1.1.
+
+\begin{figure}[t]
     \centering
-    \includegraphics[width=0.7\textwidth]{research_framework}
-    \caption{Research framework showing the relationship between research components}
+    \input{chapters/chapter01/figures/research_framework.tex}
+    \caption{System architecture of the HippoCortex Stage 1 framework, depicting the interaction between the Mamba backbone and the biological memory consolidation loop (consisting of the Stats Buffer, CVAE-based SWR Generator, and Null-Space Projector) during the wake and sleep phases.}
     \label{fig:research_framework}
 \end{figure}
-
 
 \section{Problem Statement}
 \label{sec:problem_statement}
 
-Despite advances in this field, several challenges remain:
-
+Deploying deep learning models on autonomous edge devices (e.g., legged robots) requires lifelong learning to adapt to new environments and tasks. However, existing continual learning methods fail to meet the combined constraints of edge robotics:
 \begin{enumerate}
-    \item \textbf{Challenge 1:} Describe the first problem or limitation
+    \item \textbf{Raw Data Storage and Privacy:} Rehearsal-based methods (such as iCaRL \cite{venThreeScenariosContinual2019}) maintain a buffer of raw past images. This raises privacy issues in personal environments and consumes storage that grows with the number of tasks.
     
-    \item \textbf{Challenge 2:} Describe the second problem or limitation
+    \item \textbf{High Compute Overhead:} Generative replay methods that synthesize raw pixels (like pixel-level DGR \cite{shinContinualLearningDeep2017}) require training heavy generative networks on-device, which drains battery and exceeds the computational budget of edge processors.
     
-    \item \textbf{Challenge 3:} Describe the third problem or limitation
+    \item \textbf{Subspace Exhaustion and Decay:} Gradient projection methods, such as GPM \cite{sahaGradientProjectionMemory2021} and Mamba-CL \cite{chengMambaCLOptimizingSelective2025}, update parameters orthogonal to the subspace of past tasks. When the task stream is long (e.g., 20+ tasks), the projection matrix exhausts its available degrees of freedom, restricting the model's plasticity and causing accuracy to decay.
 \end{enumerate}
 
-Explain how these challenges affect users, researchers, or industry and why solving them is important.
-
+No existing method provides exemplar-free, linear-time continual learning that remains stable on long task streams while fitting the computational and memory budget of an on-board edge processor (such as the Jetson Orin NX). HippoCortex addresses this gap by combining compact statistics buffers, latent generative replay, and null-space projection.
 
 \section{Research Objectives}
 \label{sec:objectives}
 
-The primary objective of this research is to state your main goal. The specific objectives are:
+The primary goal of this research is to develop, evaluate, and deploy a biologically-inspired continual learning framework that achieves high accuracy retention on long task streams with a constant memory footprint. The specific objectives are:
 
 \begin{enumerate}
-    \item To analyze existing approaches to the problem domain
+    \item \textbf{O1: Compact Statistics Buffer:} Design a per-task statistics memory that stores only the mean and variance of Mamba's final hidden states, keeping the storage cost constant relative to task count.
     
-    \item To design and implement a system that addresses identified gaps
+    \item \textbf{O2: SWR Generator:} Implement a lightweight Conditional Variational Autoencoder (CVAE) that learns to reconstruct synthetic past hidden states using stored statistics and task conditions.
     
-    \item To evaluate the performance of the proposed solution
+    \item \textbf{O3: Null-Space Gradient Projector:} Integrate an orthogonal gradient projection mechanism that constrains parameter updates during consolidation to prevent interference with prior tasks.
     
-    \item To provide recommendations for practitioners and researchers
+    \item \textbf{O4: Stage 1 Validation:} Evaluate the core algorithm on Split-CIFAR100 and ImageNet-R \cite{hendrycksManyFacesRobustness2021} benchmarks, aiming to outperform Mamba-CL and Inf-SSM.
+    
+    \item \textbf{O5: Embodied Extension:} Deploy a hybrid Mamba-Transformer stack on a physical Unitree Go2 Edu quadruped robot to validate adaptation under a real-world task curriculum.
 \end{enumerate}
-
 
 \section{Research Questions}
 \label{sec:research_questions}
 
-This research addresses the following questions:
+This research aims to answer the following research questions:
 
 \begin{enumerate}
-    \item RQ1: Your first research question - should be answerable through your research
+    \item \textbf{RQ1:} Can a per-task (mean, variance) summary of internal features replace raw-input replay buffers without sacrificing classification accuracy on long task streams?
     
-    \item RQ2: Your second research question
+    \item \textbf{RQ2:} Can a Conditional VAE generate compressed hidden states realistic enough to support training downstream classifiers without significant performance drop?
     
-    \item RQ3: Your third research question
+    \item \textbf{RQ3:} Does the integration of null-space gradient projection with generative latent replay mitigate catastrophic forgetting better than either method alone over long sequential tasks?
+    
+    \item \textbf{RQ4:} Can the combined HippoCortex model meet the real-time inference latency (sub-50 ms per frame) and memory constraints of a physical Jetson Orin NX edge processor?
 \end{enumerate}
-
 
 \section{Scope and Limitations}
 \label{sec:scope}
@@ -76,48 +78,65 @@ This research addresses the following questions:
 \subsection{Scope}
 \label{subsec:scope}
 
-This research focuses on:
+The scope of this study is bounded by the following parameters:
 \begin{itemize}
-    \item What technologies/platforms you're using
-    \item What specific problem aspects you're addressing
-    \item What user groups or scenarios you're targeting
-    \item What time period or data you're considering
+    \item \textbf{Continual Learning Paradigm:} Focuses on class-incremental learning (CIL) \cite{venThreeScenariosContinual2019} where task boundaries are clear during training but task identities are unknown during inference.
+    
+    \item \textbf{Model Backbone:} Targets 1D sequence modeling with Mamba 1.0 \cite{guMambaLinearTimeSequence2024} (specifically \code{mamba-ssm} v1.2.2, model dimension 128, depth 48).
+    
+    \item \textbf{Benchmarks:} Evaluated on Split-CIFAR100 \cite{venThreeScenariosContinual2019} (10-task and 20-task streams) and ImageNet-R \cite{hendrycksManyFacesRobustness2021} (style/rendition shifts) benchmarks.
+    
+    \item \textbf{Computational Platform:} Baseline training is run on a Thunder Compute instance with an NVIDIA A6000 GPU (48GB VRAM), 32GB RAM, and 4 vCPUs. Reproducing the Mamba-CL baseline on 10-task Split-CIFAR100 takes approximately 16.8 hours.
 \end{itemize}
 
 \subsection{Limitations}
 \label{subsec:limitations}
 
-The study has the following limitations:
+The following limitations apply to this research:
 \begin{itemize}
-    \item Limitation 1 - e.g., ``Limited to English language data''
-    \item Limitation 2 - e.g., ``Testing performed on simulated environment only''
-    \item Limitation 3 - e.g., ``Sample size of N participants''
-    \item Limitation 4 - e.g., ``Does not address real-time scenarios''
+    \item \textbf{Mamba 2.0 Compatibility:} The current Stage 1 null-space projection implementation relies on Mamba 1.0 parameter names and projection shapes, making it incompatible with the newer Mamba 2.0 / SSD block architecture without major re-engineering.
+    
+    \item \textbf{Latent Feature Dependency:} Generative replay is confined to the output of the final SSM layer; statistical representation of earlier intermediate layers is not captured.
+    
+    \item \textbf{Simulation to Real Gap:} Initial curriculum validation is conducted in Mujoco and Isaac Sim, which may introduce sim-to-real transfer challenges during physical robot deployment.
 \end{itemize}
-
 
 \section{Significance of the Study}
 \label{sec:significance}
 
-This research contributes to the field by:
-
+This research introduces a novel paradigm by shifting generative replay from pixel-space to compressed hidden-state space, combining it with null-space projection. The significance of this study is threefold:
 \begin{itemize}
-    \item Contribution 1 - e.g., ``Providing a novel approach to...''
-    \item Contribution 2 - e.g., ``Offering practical guidelines for...''
-    \item Contribution 3 - e.g., ``Creating a reusable framework for...''
-    \item Contribution 4 - e.g., ``Filling a gap in existing literature on...''
+    \item \textbf{Theoretical Contribution:} Provides the first formal integration of latent generative replay and gradient orthogonal projection on a linear-time selective SSM backbone.
+    
+    \item \textbf{Resource Efficiency:} Eliminates raw data storage completely, maintaining a constant memory footprint that enables long-term lifelong learning on edge hardware.
+    
+    \item \textbf{Embodied Validation:} Validates continual learning not just on static databases, but on a physical quadruped robot performing sequential tasks, connecting theoretical continual learning with practical robotic applications.
 \end{itemize}
 
+\section{Research Progress and Experimental Environment}
+\label{sec:progress}
+
+To establish baselines for evaluation, preliminary work has been conducted on reproducing existing state-of-the-art State Space Model continual learning frameworks. This baseline training was executed on a cloud-based GPU instance provided by Thunder Compute, utilizing the following hardware configuration:
+\begin{itemize}
+    \item \textbf{Graphics Processor:} NVIDIA A6000 GPU with 48 GB VRAM
+    \item \textbf{System Memory:} 32 GB RAM
+    \item \textbf{Processor:} 4 vCPUs
+    \item \textbf{Storage:} 100 GB Cloud Disk Space
+\end{itemize}
+
+Under this hardware environment, a baseline reproduction of the Mamba-CL algorithm was carried out. Specifically, the model was trained on the Split-CIFAR100 dataset partitioned into 10 sequential tasks (10 classes per task). Due to the sequential scan computations of the selective SSM layer over the task boundaries, this baseline run required approximately 16 hours of wall-clock time to complete. 
+
+At this stage, no experimental evaluations have been conducted for the proposed HippoCortex framework itself. The implementation of the compact statistics buffer, the CVAE-based SWR generator, and the null-space projection module is currently in progress, and their quantitative comparison against EWC, DGR, Mamba-CL, and Inf-SSM baselines remains future work.
 
 \section{Thesis Organization}
 \label{sec:organization}
 
-This thesis is organized as follows:
+This thesis is structured as follows:
 
-\textbf{Chapter 2: Literature Review} examines existing research on the topic, including key theoretical foundations and related work.
+\textbf{Chapter 2: Literature Review} explores the theoretical foundations of continual learning, surveys state-space modeling architectures, and critically analyzes existing works in gradient projection and generative replay.
 
-\textbf{Chapter 3: Methodology} describes the research design, tools used, and implementation details.
+\textbf{Chapter 3: Methodology} details the system architecture of HippoCortex, explaining the mathematical formulations behind the stats buffer, the SWR CVAE generator, the null-space gradient projection, and the dual-phase training loop.
 
-\textbf{Chapter 4: Results and Analysis} presents experimental findings and discusses their implications.
+\textbf{Chapter 4: Results and Analysis} presents the experimental findings on Split-CIFAR100 and ImageNet-R \cite{hendrycksManyFacesRobustness2021}, provides ablation studies, and analyzes the latency and memory profiles of the physical robot deployment.
 
-\textbf{Chapter 5: Conclusion} summarizes contributions, discusses limitations, and suggests future research directions.
+\textbf{Chapter 5: Conclusion} summarizes the research findings, highlights key contributions, addresses limitations, and outlines directions for future work in hybrid Mamba-Transformer stacks.

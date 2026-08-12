@@ -1,15 +1,20 @@
-\begin{table}[H]
+\begin{table}[ht]
     \centering
-    \caption{Hardware configuration}
+    \caption{Hardware specifications of the experimental and deployment platforms.}
     \label{tab:hardware}
-    \begin{tabular}{@{}ll@{}}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{lll}
         \toprule
-        \textbf{Component} & \textbf{Specification} \\
+        \textbf{Component} & \textbf{Cloud Training Instance (Stage 1)} & \textbf{Robotic Edge Platform (Stage 2)} \\
         \midrule
-        Processor & Intel Core i7-10700 @ 2.90GHz \\
-        RAM & 16 GB DDR4 \\
-        Storage & 512 GB SSD \\
-        Operating System & Windows 11 / Ubuntu 22.04 \\
+        Host System & Thunder Compute Cloud Instance & Unitree Go2 Edu Quadruped \\
+        Processor & 4 vCPUs & Jetson Orin NX (16GB RAM, 100 TOPS AI) \\
+        GPU & NVIDIA A6000 (48GB VRAM) & Integrated NVIDIA Ampere GPU \\
+        System RAM & 32 GB & 16 GB LPDDR5 (shared) \\
+        Storage & 100 GB SSD & 128 GB M.2 NVMe SSD \\
+        Sensors & N/A & L1 Lidar, RealSense D435i RGB-D, IMU \\
+        Operating System & Ubuntu 22.04 LTS & Ubuntu 20.04 LTS with ROS2 Foxy \\
         \bottomrule
-    \end{tabular}
+    \end{tabular}%
+    }
 \end{table}

@@ -1,0 +1,32 @@
+\begin{table}[ht]
+    \centering
+    \caption{Critical and major mathematical flaws identified in the Mamba-CL \cite{chengMambaCLOptimizingSelective2025} formulation. References correspond to the equation and section numbers in the original paper.}
+    \label{tab:mamba_cl_flaws}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{clp{10cm}}
+        \toprule
+        \textbf{No.} & \textbf{Flaw} & \textbf{Mathematical Proof of Invalidity} \\
+        \midrule
+        \multicolumn{3}{l}{\textit{Critical --- Fundamental errors that invalidate core derivations}} \\
+        \midrule
+        1 & \textbf{LTI Convolution Assumption} & Mamba is a selective (time-varying) SSM where $B$, $C$, and $\delta$ vary per token. The global convolution $Y = X * K$ (Eq.~3--4) is valid only for Linear Time-Invariant SSMs (e.g., S4). Deriving constraints from $K_t = K_{t+1}$ is invalid for Mamba. \\
+        \midrule
+        2 & \textbf{Incorrect ZOH Formula} & Eq.~(2) writes $\bar{B} = (\delta A)^{-1}(\exp(\delta A - I))\delta B$ with identity $I$ inside the exponential. The correct ZOH is $\bar{B} = (\delta A)^{-1}(\exp(\delta A) - I)\delta B$. Since $\exp(\delta A - I) = e^{-1}\exp(\delta A) \neq \exp(\delta A) - I$, the formula is wrong. \\
+        \midrule
+        3 & \textbf{$A$ Parameter Frozen} & Eq.~(1) defines $\delta \in \mathbb{R}^{L \times 1}$, making $Q_2 = \delta_t^\top \delta_t$ a $1 \times 1$ positive scalar. SVD yields zero null-space vectors, forcing projector $H_2 = 0$ and $\Delta A = H_2 G_A = 0$. Parameter $A$ is completely frozen. \\
+        \midrule
+        4 & \textbf{$Q_2$ Dimension Mismatch} & Sec.~4.3 defines $Q_2 = \delta_t^\top \delta_t$ ($1 \times 1$ scalar for $\delta \in \mathbb{R}^{ML \times 1}$), but Sec.~5.5 claims $Q_2 = \delta_t \delta_t^\top \in \mathbb{R}^{L \times L}$. These are different matrices (inner vs.\ outer product). If $H_2 \in \mathbb{R}^{L \times L}$, it cannot project $G_A \in \mathbb{R}^{D \times N}$. \\
+        \midrule
+        \multicolumn{3}{l}{\textit{Major --- Logical gaps that undermine theoretical claims}} \\
+        \midrule
+        5 & \textbf{Static Null-Space Invalid} & Updates of $W_B$ are projected into the null-space of $\delta_t X_t$ (Eq.~21), but $\delta_t = \tau_\delta(\text{param} + X_t W_\delta)$ is non-linear in $X_t$. Updating $W_\delta$ shifts the null-space, invalidating the static projection when both parameters change. \\
+        \midrule
+        6 & \textbf{Unconstrained Bias Term} & The condition $X_t \Delta W_\delta = 0$ (Eq.~16) ensures the linear component of $\delta$ is unchanged, but Eq.~(1) includes a learnable bias \texttt{param}. This bias is never constrained; if it changes, $\delta_{t+1} \neq \delta_t$ even when $X_t \Delta W_\delta = 0$. \\
+        \midrule
+        7 & \textbf{Overly Restrictive Kernel Condition} & From $X_t * K_t = X_t * K_{t+1}$ (Eq.~8), the paper directly concludes $K_t = K_{t+1}$ (Eq.~9). The valid deduction is $X_t * (K_t - K_{t+1}) = 0$, which does not require $K_t = K_{t+1}$, forfeiting plasticity. \\
+        \midrule
+        8 & \textbf{Compounding Layer Drift} & The projector $H_{\text{out}}$ for the output linear layer is computed on inputs depending on the SSM output. With balance factor $\eta < 1$, SSM outputs drift, immediately invalidating $H_{\text{out}}$. \\
+        \bottomrule
+    \end{tabular}%
+    }
+\end{table}

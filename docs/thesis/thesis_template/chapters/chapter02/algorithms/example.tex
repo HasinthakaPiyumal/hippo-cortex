@@ -1,16 +1,31 @@
 \begin{algorithm}[H]
-\caption{Example Algorithm}
-\label{alg:example}
+\caption{HippoCortex Sleep-Wake Continual Learning Loop}
+\label{alg:swr_consolidation}
 \begin{algorithmic}[1]
-\Require Input data $D$, Parameter $k$
-\Ensure Output result $R$
-\State Initialize $R \gets \emptyset$
-\For{each item $i$ in $D$}
-    \If{condition is met}
-        \State Process item $i$
-        \State Add result to $R$
+\Require Sequential task stream $\{D_t\}_{t=0}^{T-1}$, Mamba backbone $f_\theta$, SWR generator $G_\psi$, Null-space projector $P_U$, Stats buffer $B$
+\Ensure Continually updated backbone parameters $\theta$
+
+\For{each task $t = 0$ \textbf{to} $T-1$}
+    \State \textbf{Phase 1: Awake - Warmup}
+    \State Train classification head for task $t$ on current task data $D_t$ using Cross-Entropy loss.
+    
+    \State \textbf{Phase 2: Awake - Joint Training}
+    \State Train backbone $f_\theta$ on $D_t$ with projected gradients:
+    \If{$t > 0$}
+        \State Retrieve stats $(\mu, \sigma^2)$ of prior tasks from buffer $B$.
+        \State Generate synthetic past hidden states $\hat{H}$ using generator $G_\psi$.
+        \State Compute joint loss: $\mathcal{L}_{\text{joint}} = \mathcal{L}_{\text{CE}}(D_t) + \beta \mathcal{L}_{\text{ELBO}}(\hat{H})$.
+    \Else
+        \State Compute standard Cross-Entropy loss: $\mathcal{L}_{\text{joint}} = \mathcal{L}_{\text{CE}}(D_t)$.
     \EndIf
+    \State Project gradients to null-space: $g_{\text{proj}} = P_U.\text{project}(\nabla_\theta \mathcal{L}_{\text{joint}})$.
+    \State Update backbone parameters: $\theta \leftarrow \theta - \alpha \cdot g_{\text{proj}}$ (where $\alpha$ is the learning rate).
+
+    \State \textbf{Phase 3: Sleep - Consolidation}
+    \State Extract real hidden states $H_t$ from current task data $D_t$.
+    \State Calculate and store current task mean and variance $(\mu_t, \sigma_t^2)$ in buffer $B$.
+    \State Train generator $G_\psi$ to reconstruct current task hidden states $H_t$.
+    \State Update null-space projector basis $U$ with the feature directions of $H_t$.
 \EndFor
-\State \Return $R$
 \end{algorithmic}
 \end{algorithm}

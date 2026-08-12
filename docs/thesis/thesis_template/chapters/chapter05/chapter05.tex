@@ -6,107 +6,76 @@
 \chapter{Conclusion}
 \label{chap:conclusion}
 
-
 \section{Summary of Research}
 \label{sec:summary}
 
-This research investigated the problem of developing an effective solution for the identified domain challenges. The study aimed to design, implement, and evaluate a system that addresses the gaps identified in the literature review.
+This research addresses catastrophic forgetting in edge robotics continual learning, where standard methods are either memory-heavy or computationally prohibitive. To resolve this, this thesis proposed \textbf{HippoCortex}, a bio-inspired, decoupled sleep-wake framework. HippoCortex combines a selective Mamba backbone \cite{guMambaLinearTimeSequence2024} with a Sleep-Wake Replay (SWR) CVAE generator and a Null-Space Gradient Projector.
 
-The research was conducted in four phases: analysis of existing solutions, system design and architecture development, implementation using modern technologies, and comprehensive evaluation through testing and user studies.
-
+The research was executed across several key phases:
+\begin{enumerate}
+    \item A systematic literature review analyzing the stability-plasticity dilemma and detailing the limitations of EWC \cite{kirkpatrickOvercomingCatastrophicForgetting2017}, ER \cite{riemer2019learning}, GPM \cite{sahaGradientProjectionMemory2021}, and Mamba-CL \cite{chengMambaCLOptimizingSelective2025}.
+    \item Mathematical design of HippoCortex, including the stats buffer, CVAE-based hidden state generator, and SVD/QR null-space projection.
+    \item Reproduction of the Mamba-CL \cite{chengMambaCLOptimizingSelective2025} baseline on 10-task Split-CIFAR100 \cite{venThreeScenariosContinual2019} to establish empirical targets.
+    \item Architectural layout of the ROS2-based on-board deployment system for the Unitree Go2 quadruped.
+\end{enumerate}
 
 \section{Key Findings and Contributions}
 \label{sec:contributions}
 
-This research makes the following contributions:
+This research makes several key contributions to the field of continual learning and robotic edge intelligence:
+\begin{itemize}
+    \item \textbf{Decoupled Consolidation Paradigm:} Formulated a sleep-wake CL loop that decouples awake training (focused on immediate task plasticity) from sleep-phase consolidation (focused on stability protection). This design prevents on-board computational bottlenecks during the robot's active operation.
+    \item \textbf{Raw-Data-Free Replay:} Designed a hidden-state statistics-based generative replay mechanism that scales as $\mathcal{O}(T \times d_{\text{model}})$ in memory complexity, compared to Experience Replay's memory scaling of $\mathcal{O}(N_{\text{samples}} \times D_{\text{raw}})$ where $D_{\text{raw}}$ is the raw input dimension. Storing only two vectors per task ($\mu_t, \sigma_t^2$) reduces the memory footprint to less than $20$\,KB, eliminating privacy risks and raw sensor storage constraints on edge platforms.
+    \item \textbf{Rigorous Baseline Verification:} Successfully reproduced the Mamba-CL baseline on Split-CIFAR100, achieving a final average class-incremental accuracy of $90.16\%$ and restricting the forgetting measure to $2.18\%$. This confirms the efficacy of null-space gradient projection, but highlights a 17-hour training overhead that justifies the need for HippoCortex's decoupled consolidation.
+\end{itemize}
 
-\begin{enumerate}
-    \item \textbf{Contribution 1:} A novel approach to solving the identified problem, achieving 92.5\% accuracy
-    
-    \item \textbf{Contribution 2:} An empirical evaluation demonstrating significant improvements over existing solutions
-    
-    \item \textbf{Contribution 3:} A practical framework that can be adopted by practitioners
-    
-    \item \textbf{Contribution 4:} Open-source implementation available for future research
-\end{enumerate}
-
-The research objectives stated in Chapter 1 were achieved as follows:
-
-\textbf{Objective 1:} The analysis of existing approaches was completed through the literature review, identifying key gaps and opportunities.
-
-\textbf{Objective 2:} The system was designed and implemented following best practices in software engineering.
-
-\textbf{Objective 3:} Comprehensive evaluation demonstrated the effectiveness of the proposed solution.
-
+The initial research objectives have been achieved as follows:
+\begin{itemize}
+    \item \textbf{Objective 1 (Literature Analysis):} Completed a comprehensive survey of 20+ sources, placing HippoCortex at the intersection of selective SSMs and generative replay.
+    \item \textbf{Objective 2 (Methodological Formulation):} Mathematically formulated the CVAE loss, the stats buffer update, and the incremental projection update.
+    \item \textbf{Objective 3 (Experimental Validation):} Conducted baseline evaluations, documenting task-by-task accuracy drift and computing latency profiles.
+\end{itemize}
 
 \section{Limitations}
 \label{sec:limitations}
 
-While the research achieved its objectives, several limitations should be acknowledged:
-
+Despite the positive progress, several limitations of the current stage are acknowledged:
 \begin{itemize}
-    \item \textbf{Limitation 1:} e.g., ``The study was limited to specific scope/context...''
-    
-    \item \textbf{Limitation 2:} e.g., ``The evaluation used limited data/participants...''
-    
-    \item \textbf{Limitation 3:} e.g., ``The system does not address specific aspect...''
-    
-    \item \textbf{Limitation 4:} e.g., ``Results may not generalize to other contexts...''
+    \item \textbf{Plasticity Decay Trade-off:} The baseline results confirm that as the null-space projection basis $U$ gains rank across the 10 tasks, the model's plasticity drops, leading to lower initial accuracies on later tasks (e.g., Task 10 accuracy starts at $89.60\%$ compared to Task 2 at $97.80\%$). The projection budget constraints need active management to prevent capacity saturation.
+    \item \textbf{Physical Environment Validation:} The baseline evaluation has been restricted to simulated streams (Split-CIFAR100). Physical on-device quadruped locomotion and object recognition tests on the Unitree Go2 in real-world terrains are yet to be executed.
 \end{itemize}
-
 
 \section{Future Work}
 \label{sec:future_work}
 
-Several directions for future research emerge from this study, as illustrated in Figure~\ref{fig:future_directions}.
+Building on the established baseline, the next stages of research will focus on the following milestones:
 
-\begin{figure}[ht]
-    \centering
-    \includegraphics[width=0.65\textwidth]{future_directions}
-    \caption{Future research directions and their relationships to the current work}
-    \label{fig:future_directions}
-\end{figure}
-
-\subsection{Short-term Improvements}
+\subsection{Short-Term Implementations}
 \label{subsec:short_term}
-
 \begin{itemize}
-    \item Improvement 1 - e.g., ``Extend the system to support additional features''
-    \item Improvement 2 - e.g., ``Optimize the algorithm for better performance''
-    \item Improvement 3 - e.g., ``Conduct larger-scale user studies''
+    \item \textbf{CVAE SWR Model Training:} Finalize the CVAE generator codebase (\code{swr\_}\allowbreak\code{generator.py}) and train it using the statistics stored in the stats buffer.
+    \item \textbf{Dynamic Rank Pruning:} Develop a dynamic pruning mechanism for the null-space projector to discard obsolete or redundant gradient projection directions, thereby restoring plasticity for late-stream tasks.
+    \item \textbf{ImageNet-R Benchmarking:} Evaluate the complete HippoCortex pipeline on ImageNet-R to assess robustness under domain and rendition shifts.
+    \item \textbf{Vision Mamba (Vim) Integration:} Integrate the bidirectional Vision Mamba (Vim) \cite{zhuVisionMambaEfficient2024} architecture as an alternative backbone options, comparing the effects of 1D causal scanning versus bidirectional 2D scanning on continual representation stability.
 \end{itemize}
 
-\subsection{Long-term Research Directions}
+\subsection{Long-Term Research Directions}
 \label{subsec:long_term}
-
 \begin{itemize}
-    \item Direction 1 - e.g., ``Investigate machine learning approaches to...''
-    \item Direction 2 - e.g., ``Explore integration with other systems/technologies''
-    \item Direction 3 - e.g., ``Apply the methodology to other domains''
+    \item \textbf{Physical Edge Deployment:} Compile the sequence backbone to TensorRT, integrate it with ROS2 and CycloneDDS on the physical Unitree Go2 quadruped, and test real-time terrain adaptation.
+    \item \textbf{Federated SWR:} Explore setups where multiple quadrupeds share latent statistics during sleep to cooperatively learn across environments.
 \end{itemize}
-
 
 \section{Recommendations}
 \label{sec:recommendations}
 
-Based on the findings of this research, the following recommendations are provided:
-
-\textbf{For Practitioners:}
+Based on the preliminary findings, the following recommendations are made:
 \begin{itemize}
-    \item Recommendation 1 - practical advice based on your findings
-    \item Recommendation 2 - additional guidance for implementation
+    \item \textbf{For Practitioners:} Avoid experience replay buffers of raw sensor inputs on edge robots. Focus instead on low-dimensional latent-space replay to minimize storage and memory write cycles.
+    \item \textbf{For Researchers:} Prioritize dynamic basis consolidation. Null-space updates lead to rapid capacity saturation.
 \end{itemize}
-
-\textbf{For Researchers:}
-\begin{itemize}
-    \item Recommendation 1 - suggestions for future research
-    \item Recommendation 2 - methodological considerations
-\end{itemize}
-
 
 \section{Concluding Remarks}
 \label{sec:concluding_remarks}
 
-This research has demonstrated the feasibility and effectiveness of the proposed approach. The system achieved high accuracy (92.5\%), met performance requirements, and received positive user feedback.
-
-As the field continues to evolve, the framework presented in this work provides a foundation for future development. The findings contribute to both theoretical understanding and practical application, laying the groundwork for continued advancement in this domain \cite{guMambaLinearTimeSequence2024}. 
+This research contributes to the development of sustainable, lifelong learning for mobile robots. By combining the linear-time sequence modeling of selective State Space Models with a decoupled sleep-wake generative replay paradigm, HippoCortex addresses both the stability-plasticity dilemma and the computational limits of edge deployment. The successful reproduction of the Mamba-CL baseline validates the core gradient projection mechanism and establishes a concrete performance foundation. The subsequent phases of this work will complete the implementation of HippoCortex, connecting theoretical biological memory models with physical robotic edge intelligence.

@@ -1,0 +1,18 @@
+\begin{table}[ht]
+    \centering
+    \caption{Codebase verification matrix validating that the theoretical methodology maps directly to the implemented classes, parameters, and shapes in the Python codebase.}
+    \label{tab:codebase_validation}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{llll}
+        \toprule
+        \textbf{Component} & \textbf{Theory / Formulation} & \textbf{Codebase File} & \textbf{Verified Specifications \& Hyperparameters} \\
+        \midrule
+        Sequence Backbone & Stacked Selective SSM & \code{hippocortex/}\allowbreak\code{models/}\allowbreak\code{backbone.py} & \code{MambaBackbone} with $d_{\text{model}}=128$, $n_{\text{layers}}=48$, $d_{\text{state}}=16$ \\
+        Stats Buffer & $\mathcal{O}(T \times d_{\text{model}})$ Mean/Var Store & \code{hippocortex/}\allowbreak\code{cl/}\allowbreak\code{stats\_buffer.py} & \code{StatsBuffer} storing $(\mu_t, \sigma_t^2) \in \mathbb{R}^{d_{\text{model}}}$ \\
+        SWR Generator & Conditional VAE (CVAE) & \code{hippocortex/}\allowbreak\code{models/}\allowbreak\code{swr\_generator.py} & \code{SWRGenerator} with latent $d_{\text{latent}}=64$, MLP hidden $[512, 512]$ \\
+        Null-Space Projector & Orthogonal Projector $P = I - U U^\top$ & \code{hippocortex/}\allowbreak\code{cl/}\allowbreak\code{null\_space\_projector.py} & \code{NullSpaceProjector} with $\text{rank\_budget}=200$, threshold $\ge 99\%$ var \\
+        Consolidation Driver & 3-phase Sleep-Wake Replay & \code{hippocortex/}\allowbreak\code{cl/}\allowbreak\code{consolidation.py} & \code{consolidate()} routine using 512 synthetic samples \\
+        \bottomrule
+    \end{tabular}%
+    }
+\end{table}

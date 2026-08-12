@@ -1,18 +1,25 @@
-\begin{table}[H]
+\begin{table}[ht]
     \centering
-    \caption{Performance measurement results}
-    \label{tab:performance_results}
-    \begin{tabular}{@{}lcccc@{}}
+    \caption{Task-by-task training statistics and class-incremental evaluation results for the Mamba-CL baseline on Split-CIFAR100 (10 tasks, 10 classes per task) using the De-focus Mamba Large backbone.}
+    \label{tab:mamba_cl_summary}
+    \resizebox{\textwidth}{!}{%
+    \begin{tabular}{cccccc}
         \toprule
-        \textbf{Test Case} & \textbf{Accuracy (\%)} & \textbf{Time (ms)} & \textbf{Score} & \textbf{Status} \\
+        \textbf{Task ID} & \textbf{Training Time} & \textbf{Final Training Loss} & \textbf{Training Top-1 Accuracy} & \textbf{Class-Incremental Accuracy} & \textbf{Forgetting Measure} \\
         \midrule
-        Test 1 & 95.2 & 120 & 4.5 & Pass \\
-        Test 2 & 92.8 & 145 & 4.2 & Pass \\
-        Test 3 & 88.5 & 180 & 3.8 & Pass \\
-        Test 4 & 91.3 & 135 & 4.1 & Pass \\
-        Test 5 & 94.7 & 125 & 4.4 & Pass \\
+        Task 1 & 01:40:08 & 0.1831 & 93.83\% & 97.30\% & 0.00\% \\
+        Task 2 & 01:40:31 & 0.2061 & 93.06\% & 97.45\% & 0.20\% \\
+        Task 3 & 01:40:28 & 0.2280 & 92.45\% & 94.13\% & 0.85\% \\
+        Task 4 & 01:40:43 & 0.1832 & 93.76\% & 93.10\% & 1.57\% \\
+        Task 5 & 01:40:45 & 0.2229 & 92.46\% & 92.82\% & 1.33\% \\
+        Task 6 & 01:40:38 & 0.2227 & 92.42\% & 92.35\% & 1.40\% \\
+        Task 7 & 01:40:43 & 0.1728 & 94.14\% & 91.21\% & 1.58\% \\
+        Task 8 & 01:40:48 & 0.2835 & 90.11\% & 90.94\% & 1.76\% \\
+        Task 9 & 01:40:35 & 0.2299 & 92.16\% & 90.62\% & 2.00\% \\
+        Task 10 & 01:36:10 & 0.1781 & 94.18\% & 90.16\% & 2.18\% \\
         \midrule
-        \textbf{Average} & \textbf{92.5} & \textbf{141} & \textbf{4.2} & -- \\
+        \textbf{Total} & \textbf{16:52:30} & --- & --- & \textbf{90.16\%} & \textbf{2.18\%} \\
         \bottomrule
-    \end{tabular}
+    \end{tabular}%
+    }
 \end{table}

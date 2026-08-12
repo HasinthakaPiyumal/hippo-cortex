@@ -1,0 +1,56 @@
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+    xscale=1.0, yscale=0.5,
+    dot/.style={circle, fill=blue!80!black, inner sep=2pt},
+    labelnode/.style={font=\sffamily\scriptsize}
+]
+
+% Draw grid and axes
+\draw[help lines, color=gray!30, ystep=2] (1, 85) grid (10, 100);
+\draw[-Stealth, thick] (0.8, 85) -- (10.5, 85) node[right, labelnode] {Task Number};
+\draw[-Stealth, thick] (1, 84) -- (1, 100.5) node[above, labelnode] {Accuracy (\%)};
+
+% Axis tick marks
+\foreach \x in {1,2,3,4,5,6,7,8,9,10} {
+    \draw (\x, 85.2) -- (\x, 84.8) node[below, labelnode] {\x};
+}
+\foreach \y in {86,88,90,92,94,96,98,100} {
+    \draw (0.9, \y) -- (1.1, \y) node[left, labelnode] {\y\%};
+}
+
+% Plot Accuracy curve
+\draw[blue!80!black, thick, -] 
+    (1, 97.30) -- (2, 97.45) -- (3, 94.13) -- (4, 93.10) -- (5, 92.82) -- 
+    (6, 92.35) -- (7, 91.21) -- (8, 90.94) -- (9, 90.62) -- (10, 90.16);
+
+% Plot Accuracy dots
+\node[dot] at (1, 97.30) {};
+\node[dot] at (2, 97.45) {};
+\node[dot] at (3, 94.13) {};
+\node[dot] at (4, 93.10) {};
+\node[dot] at (5, 92.82) {};
+\node[dot] at (6, 92.35) {};
+\node[dot] at (7, 91.21) {};
+\node[dot] at (8, 90.94) {};
+\node[dot] at (9, 90.62) {};
+\node[dot] at (10, 90.16) {};
+
+% Labels for values
+\node[above, blue!80!black, font=\sffamily\tiny] at (1, 97.30) {97.3\%};
+\node[above, blue!80!black, font=\sffamily\tiny] at (2, 97.45) {97.5\%};
+\node[below, blue!80!black, font=\sffamily\tiny] at (3, 94.13) {94.1\%};
+\node[below, blue!80!black, font=\sffamily\tiny] at (4, 93.1) {93.1\%};
+\node[above, blue!80!black, font=\sffamily\tiny] at (5, 92.82) {92.8\%};
+\node[below, blue!80!black, font=\sffamily\tiny] at (6, 92.35) {92.4\%};
+\node[above, blue!80!black, font=\sffamily\tiny] at (7, 91.21) {91.2\%};
+\node[below, blue!80!black, font=\sffamily\tiny] at (8, 90.94) {90.9\%};
+\node[above, blue!80!black, font=\sffamily\tiny] at (9, 90.62) {90.6\%};
+\node[below, blue!80!black, font=\sffamily\tiny] at (10, 90.16) {90.2\%};
+
+% Legend
+\draw[draw=gray!50, fill=white, rounded corners=2pt] (7.5, 98) rectangle (10.2, 99.5);
+\draw[blue!80!black, thick] (7.7, 98.75) -- (8.2, 98.75) node[dot, pos=0.5] {};
+\node[right, labelnode] at (8.3, 98.75) {Avg. Acc.};
+
+\end{tikzpicture}%
+}

@@ -6,147 +6,191 @@
 \chapter{Methodology}
 \label{chap:methodology}
 
-
 \section{Research Design}
 \label{sec:research_design}
 
-This research employs a systematic methodology to achieve the stated objectives. The study follows a structured approach combining design, implementation, and evaluation phases.
+This research adopts an engineering-design methodology to develop, validate, and deploy HippoCortex, a biologically-inspired continual learning framework. The research is structured in two major stages: Stage 1 focuses on designing, implementing, and validating the core CL algorithms on sequence benchmarks in simulation; Stage 2 extends this architecture to a hybrid model for real-time, raw-data-free deployment on a physical quadruped robot.
 
-\subsection{Research Approach}
-\label{subsec:research_approach}
-
-The research methodology consists of the following phases:
-
+\subsection{Research Approach and Workflow}
+The workflow is divided into four iterative phases to align theoretical modeling with codebase validation:
 \begin{enumerate}
-    \item \textbf{Phase 1 - Analysis:} Review existing solutions and identify requirements
-    \item \textbf{Phase 2 - Design:} Develop the system architecture and design
-    \item \textbf{Phase 3 - Implementation:} Build the proposed solution
-    \item \textbf{Phase 4 - Evaluation:} Test and validate the implementation
+    \item \textbf{Analysis Phase:} Reviewing memory and compute constraints on edge robotic devices and defining mathematical requirements.
+    \item \textbf{Design Phase:} Formulating the SWR stats buffer, CVAE architecture, null-space gradient projection equations, and hybrid Mamba-Transformer layers.
+    \item \textbf{Implementation Phase:} Constructing the Python modules, training trainer routines, and configuring on-board middleware.
+    \item \textbf{Evaluation Phase:} Validating the model on Split-CIFAR100 and ImageNet-R \cite{hendrycksManyFacesRobustness2021}, and benchmark testing on-device latency and accuracy on the Unitree Go2 Edu.
 \end{enumerate}
 
+Figure~\ref{fig:development_workflow} illustrates the training and consolidation workflow.
 
-\section{Development Environment}
+\begin{figure}[ht]
+    \centering
+    \input{chapters/chapter03/figures/development_workflow}
+    \caption{Development and training workflow of the HippoCortex framework, detailing the transition between awake learning phases and the sleep consolidation phase.}
+    \label{fig:development_workflow}
+\end{figure}
+
+\section{Development and Deployment Environment}
 \label{sec:development_environment}
 
-\subsection{Hardware Specifications}
-\label{subsec:hardware}
+To ground the empirical findings, development and testing are split between a cloud GPU instance for training the core sequence models and an on-board edge computer for real-world quadruped deployment.
 
-Table~\ref{tab:hardware} lists the hardware used for development and testing.
+\subsection{Hardware Specifications}
+Table~\ref{tab:hardware} lists the hardware configurations of the experimental systems. The NVIDIA A6000 cloud instance provides the VRAM and compute capacity needed to run the 16-hour Mamba-CL baseline training and evaluate HippoCortex models in simulation. The Jetson Orin NX (16GB) on the Unitree Go2 Edu runs inference on-board, without relying on off-site servers.
 
 \input{chapters/chapter03/tables/hardware}
 
-\subsection{Software Tools}
-\label{subsec:software}
-
-The following software tools were used:
-
+\subsection{Software Tools and Libraries}
+The software stack is built using:
 \begin{itemize}
-    \item \textbf{IDE:} Visual Studio Code - For code development
-    \item \textbf{Programming Language:} Python 3.10 - Primary language
-    \item \textbf{Framework:} Django 4.0 - Web framework
-    \item \textbf{Database:} PostgreSQL 14 - Data storage
-    \item \textbf{Version Control:} Git/GitHub - Code management
+    \item \textbf{Primary Language:} Python 3.10, ensuring compatibility with PyTorch, CUDA, and robotics middleware.
+    \item \textbf{Deep Learning Backend:} PyTorch 2.0+ (compiled with CUDA 11.8), leveraging its optimized \code{torch.linalg} backend for fast SVD and QR decomposition operations during null-space projector updates.
+    \item \textbf{Sequence Backbone:} The official \code{mamba-ssm} library, utilizing custom CUDA kernels for selective scan operations.
+    \item \textbf{Robot Middleware:} ROS2 Foxy Fitzroy and CycloneDDS for on-board sensor ingestion and command routing.
+    \item \textbf{Robotics SDK:} Unitree SDK2, enabling the Python controller to send joint and velocity commands directly to the quadruped motor boards.
 \end{itemize}
-
 
 \section{System Architecture}
 \label{sec:system_architecture}
 
-Figure~\ref{fig:system_architecture} presents the overall system architecture.
+Figure~\ref{fig:system_architecture} illustrates the system architecture of HippoCortex, highlighting the on-board components running on the Jetson Orin NX edge platform.
 
 \begin{figure}[ht]
     \centering
-    \includegraphics[width=0.8\textwidth]{system_architecture}
-    \caption{System architecture showing main components and their interactions}
+    \input{chapters/chapter03/figures/system_architecture}
+    \caption{System architecture of HippoCortex showing the flow from physical sensor ingestion on the Unitree Go2 Edu to the hybrid sequence backbone, supervised by the stats buffer, SWR generator, and null-space projector.}
     \label{fig:system_architecture}
 \end{figure}
 
-\subsection{Component 1: Data Layer}
-\label{subsec:data_layer}
+\subsection{Mamba Sequence Backbone}
+The sequence backbone processes sequential patch embeddings or sensor data. The network consists of an $L$-layer stack of selective state-space blocks (detailed in the codebase file \code{hippocortex/}\allowbreak\code{models/}\allowbreak\code{backbone.py}). 
 
-Describe what this component does and how it works. The data layer handles all database operations and data persistence.
+Currently, the primary backbone is configured using the \textbf{De-focus Mamba} \cite{taoLearning1DCausal} architecture. De-focus Mamba treats images as a 1D causal sequence of tokens, utilizing learnable bandpass filters to broaden the attention range. This design mitigates the ``over-focus'' issue inherent to applying standard causal language Mamba directly to visual data, where the network gradients and activation weights tend to concentrate on a very small fraction of visual tokens, limiting the representation capacity. 
 
-\subsection{Component 2: Business Logic Layer}
-\label{subsec:business_layer}
+For future experimental stages, the framework is designed to also support \textbf{Vision Mamba (Vim)} \cite{zhuVisionMambaEfficient2024}. Unlike the 1D causal scanning of De-focus Mamba, Vim uses bidirectional Mamba blocks to scan patch sequences in both forward and backward directions, combined with position embeddings to capture non-causal 2D global context. In future experiments, we will compare 1D causal scanning against bidirectional 2D scanning to analyze how different state scan directions affect the stability-plasticity trade-off and representation drift under null-space projection.
 
-Describe the second main component. The business logic layer contains the core algorithms and processing logic.
+For both models, a forward hook is registered on the penultimate block to capture the hidden state activations. The raw captured tensor has shape $(B, T_s, d_{\text{model}})$, where $B$ is the batch size, $T_s$ is the sequence length, and $d_{\text{model}}$ is the model dimension. To obtain a sequence-level summary, the hook mean-pools the activations across the temporal dimension $T_s$ to yield the representation $H \in \mathbb{R}^{B \times d_{\text{model}}}$:
+\begin{equation}
+    H = \frac{1}{T_s} \sum_{k=1}^{T_s} h_k^L
+    \label{eq:hidden_extraction}
+\end{equation}
+where $T_s$ is the sequence length, and $h_k^L \in \mathbb{R}^{B \times d_{\text{model}}}$ is the output of the final Mamba block at step $k$. This representation $H$ is fed to the classification head during the awake phase and serves as the training target for consolidation during the sleep phase.
 
-\subsection{Component 3: Presentation Layer}
-\label{subsec:presentation_layer}
+\subsection{Stats Buffer}
+The stats buffer (detailed in \code{stats\_buffer.py}) acts as a compact, raw-data-free long-term memory. At the end of each task $t$, the real hidden states $H_t$ are collected. Instead of saving these states, the buffer stores their mean $\mu_t$ and variance $\sigma_t^2$ (both in $\mathbb{R}^{d_{\text{model}}}$):
+\begin{equation}
+    \mu_{t} = \frac{1}{N} \sum_{i} H_{t,i}, \ \sigma_{t}^2 = \frac{1}{N} \sum_{i} (H_{t,i} - \mu_{t})^2
+    \label{eq:buffer_stats}
+\end{equation}
+Because the buffer stores only two $d_{\text{model}}$-dimensional vectors per task, the memory footprint scales as $\mathcal{O}(T \times d_{\text{model}})$. For $T=20$ tasks and $d_{\text{model}}=128$, the footprint is less than $20$\,KB, making it highly suitable for resource-constrained edge systems.
 
-Describe the user interface component. The presentation layer handles user interactions and displays results.
+\subsection{Sharp Wave Ripple (SWR) CVAE Generator}
+The SWR generator (detailed in \code{hippocortex/}\allowbreak\code{models/}\allowbreak\code{swr\_}\allowbreak\code{generator.py}) is structured as a Conditional Variational Autoencoder (CVAE). The encoder maps concatenated hidden states and task embeddings (dimension $d_{\text{model}} + d_{\text{task\_emb}}$) to latent parameters $(\mu_q, \log\sigma_q^2)$ using two 512-unit layers. The decoder decodes latent samples $z \sim \mathcal{N}(\mu_q, \sigma_q^2)$ back to the $d_{\text{model}}$-dimensional space.
 
+The model is trained by optimizing the Evidence Lower Bound (ELBO) loss \cite{sohnLearningStructuredOutput2015}:
+\begin{equation}
+    \mathcal{L}_{\text{ELBO}} = \|H - \hat{H}\|^2 + \beta D_{\text{KL}}\left(\mathcal{N}(\mu_q, \sigma_q^2) \parallel \mathcal{N}(0, I)\right)
+    \label{eq:elbo_loss}
+\end{equation}
+where $\hat{H}$ is the reconstructed state and $\beta = 1.0$. During the consolidation phase, the generator draws samples $z \sim \mathcal{N}(\mu_t, \sigma_t^2)$ from the statistics stored in the stats buffer and decodes them to generate synthetic hidden states $\hat{H}_{\text{past}}$, simulating hippocampal sharp-wave ripples. Note the operational difference: during active training, the encoder computes the posterior distribution $q(z \mid H, c)$ dynamically to output the latent distribution $(\mu_q, \sigma_q^2)$, which is regularized toward the standard normal prior $\mathcal{N}(0, I)$ by the KL divergence. During offline sleep replay, however, the encoder is bypassed entirely. The latent vector $z$ is sampled directly from the Gaussian distribution $\mathcal{N}(\mu_t, \sigma_t^2)$ defined by the statistics buffer for task $t$, and passed to the decoder to reconstruct the synthetic hidden states.
 
-\section{Implementation}
+\subsection{Null-Space Gradient Projector}
+The null-space gradient projector (detailed in \code{null\_space\_projector.py}) constrains parameter updates to prevent interference. Given a batch of hidden states, the projector performs SVD to extract the primary feature directions \cite{sahaGradientProjectionMemory2021}:
+\begin{equation}
+    H_t = U_h \Sigma V_h^\top
+    \label{eq:svd_states}
+\end{equation}
+We keep the singular vectors in $V_h$ that capture $99\%$ of the variance, merging them with the prior basis $U_{t-1}$ via QR decomposition to form the new basis $U_t$ \cite{luVisualPromptTuning}:
+\begin{equation}
+    Q, R = \text{QR}\left(\left[U_{t-1}, V_{h, 1:r}\right]\right)
+    \label{eq:qr_merge}
+\end{equation}
+The projector truncates $Q$ to a maximum size defined by the $\text{rank\_budget}$ ($k \le 200$) to yield $U_t$. During joint training, gradients $g$ are projected into the null-space \cite{sahaGradientProjectionMemory2021}:
+\begin{equation}
+    g_{\text{proj}} = g - (g U_t) U_t^\top
+    \label{eq:projection_step}
+\end{equation}
+which is applied to Mamba's time-invariant parameter matrices---specifically the input projection $W_{\text{in}}$, the output projection $W_{\text{out}}$, and the discretized state transition matrix $\bar{A}$---where features are linearly mapped, preserving prior task representations.
+
+\section{Codebase Structural Validation}
+\label{sec:codebase_validation}
+
+To ensure the empirical results are reproducible, the methodology is verified directly against the python codebase implementation. Table~\ref{tab:codebase_validation} provides a verification matrix mapping each component to its codebase file, class, and hyperparameter configuration.
+
+\input{chapters/chapter03/tables/validation_table}
+
+\section{Implementation Details}
 \label{sec:implementation}
 
-Figure~\ref{fig:development_workflow} illustrates the development workflow adopted in this project.
+The three-phase training loop is coordinated by the \code{Trainer} class in \code{trainer.py}. Listing~\ref{lst:trainer_loop} shows this Python routine.
 
-\begin{figure}[ht]
-    \centering
-    \includegraphics[width=0.7\textwidth]{development_workflow}
-    \caption{Development workflow showing the iterative process}
-    \label{fig:development_workflow}
-\end{figure}
+\begin{lstlisting}[language=Python, caption={Continual training coordination routine from \code{hippocortex/}\allowbreak\code{training/}\allowbreak\code{trainer.py}.}, label={lst:trainer_loop}]
+def train_task(self, task_id: int, loader: DataLoader) -> dict[str, float]:
+    n_classes = self.cfg.dataset.n_classes_per_task
 
-Listing~\ref{lst:python_example} shows an example implementation.
+    # Phase 1: Awake - Warmup
+    self.backbone.set_task_head(n_classes)
+    self.backbone.train()
+    warmup_loss = self._run_warmup(loader)
 
-\begin{lstlisting}[language=Python, caption={Example Python implementation}, label={lst:python_example}]
-def process_data(input_data, threshold=0.5):
-    """
-    Process input data and return filtered results.
-    
-    Args:
-        input_data: List of data points
-        threshold: Minimum value to include
-        
-    Returns:
-        List of filtered results
-    """
-    results = []
-    for item in input_data:
-        if item.value > threshold:
-            processed = transform(item)
-            results.append(processed)
-    return results
+    # Phase 2: Awake - Joint Training
+    joint_loss = 0.0
+    if task_id > 0:
+        joint_loss = self._run_joint_phase(task_id, loader)
+
+    # Phase 3: Sleep - Consolidation
+    current_hidden = self._extract_all_hidden(loader)
+    replay_loss = consolidate(
+        self.backbone, self.swr_gen, self.projector, self.buffer,
+        task_id, self.optimizer, current_hidden,
+        n_samples=self.cfg.training.n_replay_samples
+    )
+
+    return {
+        "task_id": float(task_id),
+        "loss_warmup": warmup_loss,
+        "loss_joint": joint_loss,
+        "replay_loss": replay_loss
+    }
 \end{lstlisting}
 
-
-\section{Data Collection}
+\section{Data Collection and Preprocessing}
 \label{sec:data_collection}
 
 \subsection{Data Sources}
-\label{subsec:data_sources}
-
-Describe where your data comes from - datasets, APIs, surveys, etc.
+The Stage 1 core algorithm is evaluated on two standard image sequence datasets:
+\begin{itemize}
+    \item \textbf{Split-CIFAR100:} Composed of $20$ sequential tasks, with each task containing $5$ classes from the CIFAR-100 dataset. This benchmark tests the model's capacity to handle class-incremental drift over long task streams.
+    \item \textbf{ImageNet-R:} Contains $16$ tasks of style and rendition shifts (paintings, cartoons, embroidery) of ImageNet classes \cite{hendrycksManyFacesRobustness2021}, testing the model's robustness under domain and distribution shift.
+\end{itemize}
 
 \subsection{Data Preprocessing}
-\label{subsec:preprocessing}
-
-Explain any cleaning, transformation, or preparation of data.
-
+Images are preprocessed before being fed to the Mamba backbone:
+\begin{enumerate}
+    \item \textbf{Resolution Standardisation:} Images are resized to $224 \times 224$ pixels.
+    \item \textbf{Patch Embedding:} Following standard vision state-space protocols \cite{taoLearning1DCausal, zhuVisionMambaEfficient2024}, the resized images are split into non-overlapping patches of size $16 \times 16$ pixels, which are projected into a 1D sequence of length $196$ with embedding dimension $d_{\text{model}}=128$.
+    \item \textbf{Normalization:} Patch vectors are normalized using the mean and standard deviation computed over the ImageNet training set.
+\end{enumerate}
 
 \section{Testing and Evaluation Strategy}
 \label{sec:testing_strategy}
 
 \subsection{Evaluation Metrics}
-\label{subsec:metrics}
+The framework is evaluated using three continual learning metrics (detailed in Section 2.5): Average Accuracy ($AA$), Average Incremental Accuracy ($AIA$), and Forgetting Measure ($FM$). 
 
-The following metrics will be used to evaluate the system:
-
+On-device edge validation measures:
 \begin{itemize}
-    \item \textbf{Accuracy:} Percentage of correct predictions
-    \item \textbf{Response Time:} Average processing time in milliseconds
-    \item \textbf{User Satisfaction:} Survey score out of 5
+    \item \textbf{Inference Latency:} Measured in milliseconds per forward pass on the Jetson Orin NX.
+    \item \textbf{Memory Footprint:} Monitored in Megabytes (MB) of VRAM and system RAM during training and evaluation phases.
 \end{itemize}
 
 \subsection{Testing Approach}
-\label{subsec:testing_approach}
-
-Describe your testing methodology - unit tests, integration tests, user testing, etc.
-
+The testing strategy combines simulated validation and on-device robotic testing:
+\begin{itemize}
+    \item \textbf{Unit and Integration Testing:} The stats buffer and null-space projection operations are validated using automated unit tests. These are implemented in \code{tests/}\allowbreak\code{test\_}\allowbreak\code{stats\_}\allowbreak\code{buffer.py} and \code{tests/}\allowbreak\code{test\_}\allowbreak\code{projector.py} to verify mathematical correctness.
+    \item \textbf{On-Device Robotic Testing:} In Stage 2, the hybrid model is validated on the Go2 Edu platform in a multi-task terrain and object recognition task stream.
+\end{itemize}
 
 \section{Chapter Summary}
 \label{sec:methodology_summary}
 
-This chapter described the research methodology including the research design, development environment, system architecture, and evaluation strategy. The implementation uses modern technologies to achieve the stated objectives. The evaluation strategy employs multiple metrics to measure success.
+This methodology establishes a structured pipeline connecting our continuous-time mathematical formulations with the actual software architecture of the Python modules. By defining a clear mapping between the theoretical components---such as the stats buffer, CVAE, and gradient orthogonalization---and their concrete Python implementations, we ensure both mathematical verification and hardware execution profiling are grounded. With the software stack and experimental framework thus validated, we proceed in Chapter 4 to analyze the empirical behavior of our baseline reproduction under these design constraints.

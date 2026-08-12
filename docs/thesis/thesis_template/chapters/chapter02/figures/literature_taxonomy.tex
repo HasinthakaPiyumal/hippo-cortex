@@ -1,0 +1,61 @@
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.0cm and 1.2cm,
+    box/.style={
+        draw, 
+        rectangle, 
+        rounded corners=5pt, 
+        minimum width=3.2cm, 
+        minimum height=1.0cm, 
+        align=center, 
+        thick,
+        font=\sffamily\small
+    },
+    rootbox/.style={box, fill=gray!10, draw=gray!70!black, minimum width=4cm, minimum height=1.2cm},
+    clbox/.style={box, fill=orange!5, draw=orange!70!black},
+    ssmbox/.style={box, fill=blue!5, draw=blue!70!black},
+    projbox/.style={box, fill=red!5, draw=red!70!black},
+    subbox/.style={box, fill=gray!2, draw=gray!40, minimum width=2.8cm, font=\sffamily\scriptsize},
+    arrow/.style={-Stealth, thick, draw=gray!80},
+    labelnode/.style={font=\sffamily\scriptsize, color=gray!90!black}
+]
+
+% Root Node
+\node[rootbox] (root) {HippoCortex\\Literature Foundation};
+
+% Tier 1 Categories
+\node[clbox, left=of root, xshift=-1cm] (cl) {Continual Learning\\Paradigms};
+\node[ssmbox, below=of root, yshift=-0.5cm] (ssm) {State Space Models\\(SSMs)};
+\node[projbox, right=of root, xshift=1cm] (proj) {Orthogonal Gradient\\Projection};
+
+% Tier 2 - Continual Learning Subcategories
+\node[subbox, above left=of cl, xshift=0.5cm] (cl_reg) {\textbf{Regularization}\\EWC \cite{kirkpatrickOvercomingCatastrophicForgetting2017}\\SI, MAS};
+\node[subbox, below left=of cl, xshift=0.5cm] (cl_rep) {\textbf{Replay Methods}\\ER, DGR \cite{shinContinualLearningDeep2017}\\X-DER};
+
+% Tier 2 - SSM Subcategories
+\node[subbox, below left=of ssm, xshift=-0.5cm] (ssm_str) {\textbf{Structured SSMs}\\S4 \cite{guEfficientlyModelingLong2022}\\S4D \cite{guParameterizationInitializationDiagonal}, DSS \cite{guptaDiagonalStateSpaces}};
+\node[subbox, below=of ssm] (ssm_sel) {\textbf{Selective SSMs}\\Mamba \cite{guMambaLinearTimeSequence2024}\\Mamba-2 \cite{daoTransformersAreSSMs2024, daoTransformersAreSSMs2024a}};
+\node[subbox, below right=of ssm, xshift=0.5cm] (ssm_vis) {\textbf{Vision SSMs}\\Vim \cite{zhuVisionMambaEfficient2024}\\De-focus Mamba \cite{taoLearning1DCausal}};
+
+% Tier 2 - Projection Subcategories
+\node[subbox, above right=of proj, xshift=-0.5cm] (proj_sub) {\textbf{Subspace Methods}\\GPM \cite{sahaGradientProjectionMemory2021}\\NSCL \cite{wangTrainingNetworksNull2021}};
+\node[subbox, below right=of proj, xshift=-0.5cm] (proj_ss) {\textbf{SSM Projection}\\Mamba-CL \cite{chengMambaCLOptimizingSelective2025}\\Inf-SSM \cite{leeExemplarFreeContinualLearning2026}};
+
+% Connect Root to Tier 1
+\draw[arrow] (root.west) -- (cl.east);
+\draw[arrow] (root.south) -- (ssm.north);
+\draw[arrow] (root.east) -- (proj.west);
+
+% Connect Tier 1 to Tier 2
+\draw[arrow] (cl.north) |- (cl_reg.east);
+\draw[arrow] (cl.south) |- (cl_rep.east);
+
+\draw[arrow] (ssm.south) -- ++(0,-0.4) -| (ssm_str.north);
+\draw[arrow] (ssm.south) -- (ssm_sel.north);
+\draw[arrow] (ssm.south) -- ++(0,-0.4) -| (ssm_vis.north);
+
+\draw[arrow] (proj.north) |- (proj_sub.west);
+\draw[arrow] (proj.south) |- (proj_ss.west);
+
+\end{tikzpicture}%
+}

@@ -1,0 +1,50 @@
+\resizebox{0.95\textwidth}{!}{%
+\begin{tikzpicture}[
+    node distance=1.4cm and 1.2cm,
+    box/.style={
+        draw, 
+        rectangle, 
+        rounded corners=5pt, 
+        minimum width=3.0cm, 
+        minimum height=1.0cm, 
+        align=center, 
+        thick,
+        font=\sffamily\small
+    },
+    sensorbox/.style={box, fill=orange!5, draw=orange!70!black},
+    backbonebox/.style={box, fill=blue!5, draw=blue!70!black},
+    hcbox/.style={box, fill=green!5, draw=green!70!black},
+    controlbox/.style={box, fill=red!5, draw=red!70!black},
+    arrow/.style={-Stealth, thick, draw=gray!80},
+    labelnode/.style={font=\sffamily\scriptsize, color=gray!90!black}
+]
+
+% Nodes
+\node[sensorbox] (sensors) {Sensors (Go2 Edu)\\RGB-D, LiDAR, IMU};
+\node[backbonebox, right=of sensors, xshift=0.5cm] (mamba) {Mamba Block\\(Temporal State)};
+\node[backbonebox, below=of mamba] (transformer) {Transformer Block\\(Spatial Attention)};
+\node[hcbox, right=of mamba, xshift=0.5cm] (swr) {SWR Generator\\(CVAE Replay)};
+\node[hcbox, below=of swr] (projector) {Null-Space Projector\\(Gradient Orthogonalizer)};
+\node[controlbox, right=of swr, xshift=0.5cm] (ros) {ROS2 SDK\\CycloneDDS};
+\node[controlbox, below=of ros] (motors) {Joint Control\\Unitree SDK2};
+
+% Connect Sensors to Backbone
+\draw[arrow] (sensors.east) -- (mamba.west);
+\draw[arrow] (sensors.east) |- (transformer.west);
+
+% Connect Backbone layers
+\draw[arrow] (mamba.south) -- (transformer.north);
+\draw[arrow] (transformer.east) -- (projector.west);
+\draw[arrow] (mamba.east) -- (swr.west);
+
+% Connect HippoCortex CL components to Control/ROS
+\draw[arrow] (swr.east) -- (ros.west);
+\draw[arrow] (projector.east) -- (motors.west);
+\draw[arrow] (ros.south) -- (motors.north);
+
+% Frame to show boundaries (Edge platform)
+\draw[dashed, draw=gray!60, thick] (2.3, 0.8) rectangle (11.75, -3.8);
+\node[labelnode, anchor=south] at (7.0, -3.7) {\textbf{Jetson Orin NX (On-Board Edge Deployment)}};
+
+\end{tikzpicture}%
+}
