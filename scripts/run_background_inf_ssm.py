@@ -3,6 +3,7 @@ import subprocess
 import os
 import argparse
 import sys
+import shutil
 
 # Resolve paths
 script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -22,11 +23,34 @@ parser.add_argument("--wandb_project", type=str, default="inf-ssm-baseline", hel
 parser.add_argument("--wandb_name", type=str, default="", help="WandB run name")
 args = parser.parse_args()
 
+# Optional: WandB login if WANDB_API_KEY environment variable is present
+if os.environ.get("WANDB_API_KEY"):
+    try:
+        import wandb
+        wandb.login(key=os.environ["WANDB_API_KEY"])
+    except Exception as e:
+        print(f"Notice: WandB auto-login skipped ({e})")
+
 # Determine data root default if not specified
 if not args.data_root:
     if args.dataset == "cifar100":
         if os.path.exists("/tmp/cifar100-images"):
             args.data_root = "/tmp/cifar100-images"
+        elif os.path.exists(os.path.join(project_root, "data/cifar100-images")):
+            # Try to copy to /tmp for faster I/O if /tmp exists
+            if os.path.exists("/tmp") and os.access("/tmp", os.W_OK):
+                print("Copying data/cifar100-images to /tmp/cifar100-images for fast caching...")
+                try:
+                    shutil.copytree(
+                        os.path.join(project_root, "data/cifar100-images"),
+                        "/tmp/cifar100-images",
+                        dirs_exist_ok=True
+                    )
+                    args.data_root = "/tmp/cifar100-images"
+                except Exception:
+                    args.data_root = os.path.join(project_root, "data/cifar100-images")
+            else:
+                args.data_root = os.path.join(project_root, "data/cifar100-images")
         else:
             args.data_root = os.path.join(project_root, "data/cifar100-images")
     elif args.dataset == "imagenet_r":
@@ -42,9 +66,12 @@ venv_python = os.path.join(project_root, ".venv/bin/python")
 python_bin = venv_python if os.path.exists(venv_python) else sys.executable
 
 pretrained_path = os.path.join(project_root, "defocus_mamba_large_cls_21k.pth")
+if not os.path.exists(pretrained_path):
+    print(f"Warning: Pretrained checkpoint not found at {pretrained_path}")
 
 cmd = [
     python_bin,
+    "-u",  # Unbuffered output for real-time log flushing with nohup / background tasks
     os.path.join(project_root, "baselines/inf-ssm/train_eval.py"),
     "-d", args.dataset,
     "-t", str(args.tasks),
@@ -78,3 +105,4 @@ with open(log_path, "w") as log_file:
     print(f"Process ID (PID): {p.pid}")
     print(f"Command: {' '.join(cmd)}")
     print(f"Outputs are being written to: {log_path}")
+    print(f"To monitor output live, run:\n  tail -f {log_path}")

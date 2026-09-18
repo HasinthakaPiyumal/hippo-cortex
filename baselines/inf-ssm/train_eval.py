@@ -121,6 +121,50 @@ def get_args():
             case 'cifar100':
                 args.interp_mode = 'bicubic'
 
+    # Auto-resolve pretrained_path if default path does not exist
+    import os
+    if not os.path.exists(args.pretrained_path):
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            "./defocus_mamba_large_cls_21k.pth",
+            "../../defocus_mamba_large_cls_21k.pth",
+            os.path.join(this_dir, "../../defocus_mamba_large_cls_21k.pth"),
+            os.path.join(this_dir, "../datasets/defocus_mamba_large_cls_21k.pth"),
+            "../datasets/defocus_mamba_large_cls_21k.pth"
+        ]
+        for c in candidates:
+            if os.path.exists(c):
+                args.pretrained_path = os.path.abspath(c)
+                break
+
+    # Auto-resolve data_root if empty or not found
+    if not args.data_root or not os.path.exists(args.data_root):
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+        if args.dataset == 'cifar100':
+            candidates = [
+                "/tmp/cifar100-images",
+                "data/cifar100-images",
+                "../../data/cifar100-images",
+                os.path.join(this_dir, "../../data/cifar100-images"),
+                "../datasets/data.CIFAR100"
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    args.data_root = os.path.abspath(c) if not c.startswith("/tmp") else c
+                    break
+        elif args.dataset == 'imagenet_r':
+            candidates = [
+                "/tmp/imagenet-r",
+                "data/imagenet-r",
+                "../../data/imagenet-r",
+                os.path.join(this_dir, "../../data/imagenet-r"),
+                "../datasets/data.ImageNet-R"
+            ]
+            for c in candidates:
+                if os.path.exists(c):
+                    args.data_root = os.path.abspath(c) if not c.startswith("/tmp") else c
+                    break
+
     return args
 
 
