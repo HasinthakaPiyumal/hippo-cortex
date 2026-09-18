@@ -150,12 +150,14 @@ class MambaMixer(nn.Module):
         delta = delta / self.config.delta_scale_factor
 
         # [Inf-SSM] Extract discretized states AFTER delta scaling
-        # Bug 1 fix: apply exp() to match paper's bar_A = exp(delta * A)
-        # Bug 2 fix: use delta AFTER scale_factor division
-        # Bug 3 fix: use C AFTER RoPE application
-        # Memory fix: average across intermediate dimension D (dim=2) immediately to reduce VRAM from ~180GB to ~80MB
-        # bar_A shape: delta (B, D, L) * A (D, N) -> (B, D, L, N) -> permute to (B, L, D, N) -> mean(dim=2) -> (B, L, N)
-        bar_A = torch.exp(delta.unsqueeze(-1) * A.unsqueeze(0).unsqueeze(2)).permute(0, 2, 1, 3).mean(dim=2)
+        # Memory fix: Compute bar_A across state dimension N=16 iteratively
+        # Storing or broadcasting (B, D, L, N) at B=800 allocates 14.16 GiB in a single tensor.
+        # Computing state-by-state keeps the peak allocation under ~0.5 GiB with identical output.
+        _A_scaled = A.to(delta.dtype)
+        bar_A = torch.stack([
+            torch.exp(delta * _A_scaled[:, n].view(1, -1, 1)).mean(dim=1)
+            for n in range(_A_scaled.shape[1])
+        ], dim=-1) # (B, L, N)
         # C shape after RoPE: (B, N, L) -> transpose to (B, L, N)
         self.extracted_A = bar_A.detach() if not self.training else bar_A
         self.extracted_C = C.permute(0, 2, 1).detach() if not self.training else C.permute(0, 2, 1)
