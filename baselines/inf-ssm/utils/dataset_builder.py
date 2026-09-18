@@ -53,14 +53,30 @@ class CIFAR100Path(ImagePathDataset):
             raise FileExistsError(f"{_rf}")
         assert len(name_map) == 100
 
+        # Build mapping for textual class folder names
+        str_to_int_map = {v.replace(" ", "_"): k for k, v in name_map.items()}
+        str_to_int_map.update({v: k for k, v in name_map.items()})
+
         for cls_dir in cls_dir_list:
-            cls_int = int(cls_dir)
-            assert not cls_int in self.class_imgpath_dict
+            if cls_dir.startswith('.'):
+                continue
+            if cls_dir.isdigit():
+                cls_int = int(cls_dir)
+            elif cls_dir in str_to_int_map:
+                cls_int = str_to_int_map[cls_dir]
+            elif cls_dir.replace(" ", "_") in str_to_int_map:
+                cls_int = str_to_int_map[cls_dir.replace(" ", "_")]
+            else:
+                continue
+
+            assert not cls_int in self.class_imgpath_dict, f"Duplicate class index {cls_int} for directory {cls_dir}"
             cls_path = realpath(join(split_path, cls_dir))
-            self.class_imgpath_dict[cls_int] = [join(cls_path, img_file) for img_file in os.listdir(cls_path)]
+            if not os.path.isdir(cls_path):
+                continue
+            self.class_imgpath_dict[cls_int] = [join(cls_path, img_file) for img_file in os.listdir(cls_path) if not img_file.startswith('.')]
             self.class_int_str_map[cls_int] = name_map[cls_int]
 
-        assert len(self.class_imgpath_dict) == 100
+        assert len(self.class_imgpath_dict) == 100, f"Expected 100 classes, found {len(self.class_imgpath_dict)}"
 
 
 class ImageNetRPath(ImagePathDataset):

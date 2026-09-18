@@ -1,1 +1,1 @@
-python train_eval.py -d cifar100 --pretrained_path "PATH_TO/defocus_mamba_large_cls_21k.pth" --data_root "DATA_ROOT" --null_eta 0.95 --use_null_space --seed 2024 $@
+python train_eval.py -d cifar100 --pretrained_path "${PRETRAINED_PATH:-../../defocus_mamba_large_cls_21k.pth}" --data_root "${DATA_ROOT:-../../data/cifar100-images}" --use_inf_ssm True --inf_ssm_lambda 2e5 --seed 2024 "$@"

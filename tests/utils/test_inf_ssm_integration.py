@@ -1,12 +1,19 @@
 import os
+import sys
 import torch
-from baselines.inf_ssm.utils.config import build_model, get_config
-from baselines.inf_ssm.utils.inf_ssm_loss import InfSSMLoss
+
+# Resolve baselines/inf-ssm directory
+script_dir = os.path.dirname(os.path.abspath(__file__))
+project_root = os.path.abspath(os.path.join(script_dir, "../.."))
+inf_ssm_dir = os.path.join(project_root, "baselines/inf-ssm")
+if inf_ssm_dir not in sys.path:
+    sys.path.insert(0, inf_ssm_dir)
+
+from utils.config import build_model, get_config
+from utils.inf_ssm_loss import InfSSMLoss
 
 def test_inf_ssm_integration():
     # Resolve config file path
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    project_root = os.path.abspath(os.path.join(script_dir, "../.."))
     config_path = os.path.join(project_root, "baselines/inf-ssm/utils/defocus_mamba_large_22k.yaml")
     
     # Load config and build model
@@ -33,9 +40,9 @@ def test_inf_ssm_integration():
     
     # Validate the shapes of extracted state transitions (A) and output mapping (C)
     for A, C in extracted_states:
-        # A should be (B, L, O, N) where L is sequence length, O is channel dimension, N is state size
+        # A should be (B, L, N) [memory-optimized] or (B, L, O, N) [unreduced]
         # C should be (B, L, N)
-        assert A.dim() == 4
+        assert A.dim() in (3, 4)
         assert C.dim() == 3
         assert A.shape[0] == B
         assert C.shape[0] == B

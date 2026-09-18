@@ -1,5 +1,14 @@
+import os
+import sys
 import torch
-from baselines.inf_ssm.utils.inf_ssm_loss import InfSSMLoss
+
+# Resolve baselines/inf-ssm directory
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+inf_ssm_dir = os.path.join(project_root, "baselines/inf-ssm")
+if inf_ssm_dir not in sys.path:
+    sys.path.insert(0, inf_ssm_dir)
+
+from utils.inf_ssm_loss import InfSSMLoss
 
 def test_sylvester_solver():
     loss_fn = InfSSMLoss()
