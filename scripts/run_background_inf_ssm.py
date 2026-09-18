@@ -18,6 +18,8 @@ parser.add_argument("--seed", type=int, default=2024)
 parser.add_argument("--use_amp", type=str, default="True")
 parser.add_argument("-jt", "--workers", type=int, default=4)
 parser.add_argument("--use_wandb", action="store_true", default=True, help="Enable wandb logging")
+parser.add_argument("--wandb_project", type=str, default="inf-ssm-baseline", help="WandB project name")
+parser.add_argument("--wandb_name", type=str, default="", help="WandB run name")
 args = parser.parse_args()
 
 # Determine data root default if not specified
@@ -58,6 +60,9 @@ cmd = [
 
 if args.use_wandb:
     cmd.append("--use_wandb")
+    cmd.extend(["--wandb_project", args.wandb_project])
+    if args.wandb_name:
+        cmd.extend(["--wandb_name", args.wandb_name])
 
 log_path = os.path.join(project_root, f"training_inf_ssm_{args.dataset}.log")
 

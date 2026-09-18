@@ -109,6 +109,8 @@ def get_args():
     parser.add_argument('--decay_epochs', type=int, default=1000)
     parser.add_argument('--decay_rate', type=float, default=0.1)
     parser.add_argument('--use_wandb', action='store_true', help='Use wandb for logging')
+    parser.add_argument('--wandb_project', type=str, default='inf-ssm-baseline', help='WandB project name')
+    parser.add_argument('--wandb_name', type=str, default='', help='WandB run name')
     args = parser.parse_args()
 
     if args.interp_mode == 'auto':
@@ -748,9 +750,10 @@ if __name__ == "__main__":
     if getattr(args, 'use_wandb', False):
         try:
             import wandb
+            run_name = args.wandb_name if args.wandb_name else f"inf_ssm_{args.dataset}_seed_{args.seed}"
             wandb.init(
-                project="mamba-cl-baseline",
-                name=f"mamba_cl_{args.dataset}_seed_{args.seed}",
+                project=args.wandb_project,
+                name=run_name,
                 config=vars(args)
             )
         except ImportError:
