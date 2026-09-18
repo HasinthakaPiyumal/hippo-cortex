@@ -248,6 +248,27 @@ def train_one_epoch(GVM: GlobalVarsManager, curr_epoch: int, dataloader: DataLoa
             scalar_meter.add_step_value(len(images), loss=loss.item(), ism_loss=ism_loss.item(), batch_time=batch_time, acc_top1=acc_top1)
         else:
             scalar_meter.add_step_value(len(images), loss=loss.item(), batch_time=batch_time, acc_top1=acc_top1)
+
+        # Periodic batch logging for live tail -f monitoring
+        print_freq = max(1, len(dataloader) // 5)
+        if i_batch % print_freq == 0 or i_batch == len(dataloader):
+            if old_model is not None and args.use_inf_ssm:
+                print(f"  [Epoch {curr_epoch} | Batch {i_batch:>2}/{len(dataloader)}] loss: {loss.item():.4f} (ism: {ism_loss.item():.6f}) | top1: {acc_top1:>6.2%} | step: {batch_time:.2f}s", flush=True)
+            else:
+                print(f"  [Epoch {curr_epoch} | Batch {i_batch:>2}/{len(dataloader)}] loss: {loss.item():.4f} | top1: {acc_top1:>6.2%} | step: {batch_time:.2f}s", flush=True)
+
+            if getattr(args, 'use_wandb', False):
+                try:
+                    import wandb
+                    wandb.log({
+                        "train/batch_loss": loss.item(),
+                        "train/batch_acc": acc_top1,
+                        "train/ism_loss": ism_loss.item() if old_model is not None and args.use_inf_ssm else 0.0,
+                        "train/lr": optimizer.param_groups[0]['lr']
+                    })
+                except Exception:
+                    pass
+
         _btimer = ttime()
 
 
@@ -319,7 +340,7 @@ def train_one_task(GVM: GlobalVarsManager, taskid: int, task_classes: list[int],
     for epoch in range(0, args.epochs + 1):
         if epoch > 0:
             _epoch_scalar_str = train_one_epoch(GVM, epoch, dataloader, model, criterion, optimizer, old_model=old_model)
-            print(f"Task [{taskid + 1:>{len(_ntstr)}}/{_ntstr}] Epoch [{epoch:>{len(_nestr := str(args.epochs))}}/{_nestr}]:: {_epoch_scalar_str}")
+            print(f"Task [{taskid + 1:>{len(_ntstr)}}/{_ntstr}] Epoch [{epoch:>{len(_nestr := str(args.epochs))}}/{_nestr}]:: {_epoch_scalar_str}", flush=True)
         scheduler.step(epoch)
 
     # Clean up old model to free GPU memory
