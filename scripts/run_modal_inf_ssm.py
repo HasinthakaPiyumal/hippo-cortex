@@ -49,16 +49,17 @@ image = (
         "tqdm",
         "gdown",
     )
-    # Sync repository code into container
-    .add_local_dir(
-        ".",
-        remote_path="/root/hippo-cortex",
-        ignore=[".venv", ".git", "wandb", "__pycache__", "*.pth", "*.tar*", "data/*", "results/*"],
-    )
     .env({
         "PYTHONPATH": "/root/hippo-cortex:/root/hippo-cortex/baselines/inf-ssm",
         "PYTHONUNBUFFERED": "1",
     })
+    # Sync repository code into container as the final build step
+    .add_local_dir(
+        ".",
+        remote_path="/root/hippo-cortex",
+        ignore=[".venv", ".git", "wandb", "__pycache__", "*.pth", "*.tar*", "data/*", "results/*"],
+        copy=True,
+    )
 )
 
 # ---------------------------------------------------------------------------

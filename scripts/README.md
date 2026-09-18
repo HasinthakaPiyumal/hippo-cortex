@@ -26,12 +26,12 @@ export WANDB_API_KEY="your_wandb_api_key"
 ### 3. Launch Inf-SSM on Modal Cloud GPU
 Run Split-CIFAR100 on an NVIDIA A100-40GB GPU:
 ```bash
-modal run scripts/run_modal_inf_ssm.py --dataset cifar100 --batch-size 800 --gpu A100-40GB
+modal run --detach scripts/run_modal_inf_ssm.py --dataset cifar100 --batch-size 800 --gpu A100-40GB
 ```
 
 Or on an NVIDIA A10G (cost-efficient, ~$1.10/hr):
 ```bash
-modal run scripts/run_modal_inf_ssm.py --dataset cifar100 --batch-size 800 --gpu A10G
+modal run --detach scripts/run_modal_inf_ssm.py --dataset cifar100 --batch-size 800 --gpu A10G
 ```
 
 ### How it works under the hood:
