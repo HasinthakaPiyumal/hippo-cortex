@@ -1,3 +1,4 @@
+import sys
 import argparse
 import random
 from collections import OrderedDict
@@ -197,7 +198,9 @@ def train_one_epoch(GVM: GlobalVarsManager, curr_epoch: int, dataloader: DataLoa
         from utils.inf_ssm_loss import InfSSMLoss
         inf_ssm_loss_fn = InfSSMLoss().cuda()
 
-    for i_batch, (images, target) in tqdm.tqdm(enumerate(dataloader, 1), total=len(dataloader), dynamic_ncols=True, disable=True):
+    is_interactive = sys.stdout.isatty()
+    pbar = tqdm.tqdm(enumerate(dataloader, 1), total=len(dataloader), dynamic_ncols=True, disable=not is_interactive, desc=f"Ep {curr_epoch}")
+    for i_batch, (images, target) in pbar:
         images: Tensor = images.cuda(non_blocking=True)
         target: Tensor = target.cuda(non_blocking=True)
 
@@ -249,13 +252,17 @@ def train_one_epoch(GVM: GlobalVarsManager, curr_epoch: int, dataloader: DataLoa
         else:
             scalar_meter.add_step_value(len(images), loss=loss.item(), batch_time=batch_time, acc_top1=acc_top1)
 
-        # Periodic batch logging for live tail -f monitoring
-        print_freq = max(1, len(dataloader) // 5)
-        if i_batch % print_freq == 0 or i_batch == len(dataloader):
-            if old_model is not None and args.use_inf_ssm:
-                print(f"  [Epoch {curr_epoch} | Batch {i_batch:>2}/{len(dataloader)}] loss: {loss.item():.4f} (ism: {ism_loss.item():.6f}) | top1: {acc_top1:>6.2%} | step: {batch_time:.2f}s", flush=True)
-            else:
-                print(f"  [Epoch {curr_epoch} | Batch {i_batch:>2}/{len(dataloader)}] loss: {loss.item():.4f} | top1: {acc_top1:>6.2%} | step: {batch_time:.2f}s", flush=True)
+        # Step logging
+        if is_interactive:
+            pbar.set_postfix(loss=f"{loss.item():.4f}", ism=f"{ism_loss.item():.4f}" if old_model is not None and args.use_inf_ssm else "0", top1=f"{acc_top1:.1%}")
+        else:
+            # Periodic batch logging for live tail -f monitoring in nohup
+            print_freq = max(1, len(dataloader) // 5)
+            if i_batch % print_freq == 0 or i_batch == len(dataloader):
+                if old_model is not None and args.use_inf_ssm:
+                    print(f"  [Epoch {curr_epoch} | Batch {i_batch:>2}/{len(dataloader)}] loss: {loss.item():.4f} (ism: {ism_loss.item():.6f}) | top1: {acc_top1:>6.2%} | step: {batch_time:.2f}s", flush=True)
+                else:
+                    print(f"  [Epoch {curr_epoch} | Batch {i_batch:>2}/{len(dataloader)}] loss: {loss.item():.4f} | top1: {acc_top1:>6.2%} | step: {batch_time:.2f}s", flush=True)
 
             if getattr(args, 'use_wandb', False):
                 try:
@@ -371,7 +378,8 @@ def evaluate_one_task(GVM: GlobalVarsManager, train_taskid: int, eval_taskid: in
     set_model_mode(GVM, model, training=False)
     scalar_meter = misc.ScalarMeter(acc_class_inc="samp_avg:>6.2%")
 
-    for images, target in tqdm.tqdm(dataloader, total=len(dataloader), dynamic_ncols=True, disable=True):
+    is_interactive = sys.stdout.isatty()
+    for images, target in tqdm.tqdm(dataloader, total=len(dataloader), dynamic_ncols=True, disable=not is_interactive, desc=f"Eval [{eval_taskid + 1}]"):
         images: Tensor = images.cuda(non_blocking=True)
         target: Tensor = target.cuda(non_blocking=True)
 
