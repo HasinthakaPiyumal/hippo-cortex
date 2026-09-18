@@ -198,8 +198,28 @@ print('Dataset split and prepared on volume successfully!')
     timeout=86400,
     volumes={"/vol": volume},
 )
-def train_on_a100(**kwargs):
-    _execute_training(**kwargs)
+def train_on_a100(
+    dataset: str = "cifar100",
+    tasks: int = 10,
+    batch_size: int = 800,
+    inf_ssm_lambda: float = 2e5,
+    seed: int = 2024,
+    use_wandb: bool = True,
+    wandb_key: str = "",
+    wandb_project: str = "inf-ssm-baseline",
+    wandb_name: str = "",
+):
+    _execute_training(
+        dataset=dataset,
+        tasks=tasks,
+        batch_size=batch_size,
+        inf_ssm_lambda=inf_ssm_lambda,
+        seed=seed,
+        use_wandb=use_wandb,
+        wandb_key=wandb_key,
+        wandb_project=wandb_project,
+        wandb_name=wandb_name,
+    )
 
 
 @app.function(
@@ -208,8 +228,28 @@ def train_on_a100(**kwargs):
     timeout=86400,
     volumes={"/vol": volume},
 )
-def train_on_a10g(**kwargs):
-    _execute_training(**kwargs)
+def train_on_a10g(
+    dataset: str = "cifar100",
+    tasks: int = 10,
+    batch_size: int = 800,
+    inf_ssm_lambda: float = 2e5,
+    seed: int = 2024,
+    use_wandb: bool = True,
+    wandb_key: str = "",
+    wandb_project: str = "inf-ssm-baseline",
+    wandb_name: str = "",
+):
+    _execute_training(
+        dataset=dataset,
+        tasks=tasks,
+        batch_size=batch_size,
+        inf_ssm_lambda=inf_ssm_lambda,
+        seed=seed,
+        use_wandb=use_wandb,
+        wandb_key=wandb_key,
+        wandb_project=wandb_project,
+        wandb_name=wandb_name,
+    )
 
 
 @app.function(
@@ -218,8 +258,28 @@ def train_on_a10g(**kwargs):
     timeout=86400,
     volumes={"/vol": volume},
 )
-def train_on_l4(**kwargs):
-    _execute_training(**kwargs)
+def train_on_l4(
+    dataset: str = "cifar100",
+    tasks: int = 10,
+    batch_size: int = 800,
+    inf_ssm_lambda: float = 2e5,
+    seed: int = 2024,
+    use_wandb: bool = True,
+    wandb_key: str = "",
+    wandb_project: str = "inf-ssm-baseline",
+    wandb_name: str = "",
+):
+    _execute_training(
+        dataset=dataset,
+        tasks=tasks,
+        batch_size=batch_size,
+        inf_ssm_lambda=inf_ssm_lambda,
+        seed=seed,
+        use_wandb=use_wandb,
+        wandb_key=wandb_key,
+        wandb_project=wandb_project,
+        wandb_name=wandb_name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +297,7 @@ def main(
     wandb_project: str = "inf-ssm-baseline",
     wandb_name: str = "",
     gpu: str = "A100-40GB",
+    wait: bool = False,
 ):
     resolved_wandb_key = wandb_key or os.environ.get("WANDB_API_KEY", "")
     target_gpu = gpu.upper().strip()
@@ -264,8 +325,27 @@ def main(
     )
 
     if "A10G" in target_gpu:
-        train_on_a10g.remote(**kwargs)
+        fn = train_on_a10g
     elif "L4" in target_gpu:
-        train_on_l4.remote(**kwargs)
+        fn = train_on_l4
     else:
-        train_on_a100.remote(**kwargs)
+        fn = train_on_a100
+
+    if wait:
+        print("Running in attached mode (waiting for completion)...")
+        fn.remote(**kwargs)
+    else:
+        call = fn.spawn(**kwargs)
+        print("\n=======================================================================")
+        print("✓ Inf-SSM Training successfully spawned in Modal Cloud background!")
+        print(f"  Cloud Call ID:  {call.object_id}")
+        print(f"  Target GPU:     {target_gpu}")
+        print(f"  Dataset:        {dataset} (Tasks: {tasks}, Batch: {batch_size})")
+        print("=======================================================================")
+        print("You can safely close this terminal, disconnect from Wi-Fi, or shut down.")
+        print("The training job runs entirely in the cloud independently.")
+        print("")
+        print("To stream live logs anytime from terminal:")
+        print("  modal app list")
+        print("  modal app logs <APP_ID> --follow")
+        print("=======================================================================\n")
