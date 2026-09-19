@@ -140,9 +140,14 @@ class NullSpaceProjector:
             )
 
         # Component of the gradient lying inside the protected subspace.
+        U = self._U.to(
+        device=grad.device,
+        dtype=grad.dtype,
+    )
+
         protected_component = (
-            grad @ self._U
-        ) @ self._U.T
+            grad @ U
+        ) @ U.T
 
         # Remove the protected component.
         projected_grad = grad - protected_component

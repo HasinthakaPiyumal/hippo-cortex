@@ -208,3 +208,27 @@ def test_project_rejects_incompatible_gradient_dimension():
 
     with pytest.raises(ValueError):
         projector.project(incompatible_grad)    
+
+def test_project_matches_gradient_device_and_dtype():
+    projector = NullSpaceProjector(rank_budget=2)
+
+    hidden_states = torch.tensor(
+        [
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+
+    projector.update(hidden_states)
+
+    grad = torch.tensor(
+        [[3.0, 4.0]],
+        dtype=torch.float64,
+    )
+
+    projected = projector.project(grad)
+
+    assert projected.dtype == grad.dtype
+    assert projected.device == grad.device        
