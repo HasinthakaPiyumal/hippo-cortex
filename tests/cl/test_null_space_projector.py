@@ -98,3 +98,17 @@ def test_projected_gradient_is_orthogonal_to_protected_basis():
     expected = torch.zeros_like(protected_component)
 
     assert torch.allclose(protected_component, expected, atol=1e-6)
+
+
+def test_zero_hidden_states_do_not_create_protected_directions():
+    """
+    If hidden states contain no feature information, the projector
+    should not create any protected directions.
+    """
+    projector = NullSpaceProjector(rank_budget=2)
+
+    hidden_states = torch.zeros(3, 2)
+
+    projector.update(hidden_states)
+
+    assert projector.current_rank == 0

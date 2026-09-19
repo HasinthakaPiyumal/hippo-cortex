@@ -4,17 +4,16 @@ NullSpaceProjector — gradient orthogonaliser for continual learning.
 OWNER: Praveen Dedigama
 
 Implementation notes:
-- Maintains a basis matrix U of shape (d_model, k) where k ≤ rank_budget.
-- update() adds new task directions via incremental SVD on a batch of hidden states.
-  Use torch.linalg.svd; retain the top-r singular vectors where r is chosen to
-  capture 99% of variance (or until rank_budget is hit).
-- project(grad) computes P = I − U @ U.T and applies it to grad.
-  Pure batched PyTorch — no Python loops over individual parameters.
+- Maintains a basis matrix U of shape (d_model, k) where k <= rank_budget.
+- update() adds new task directions using SVD on hidden states.
+- Retains directions needed to capture approximately 99% of feature energy.
+- project() removes gradient components lying in the protected subspace.
 
 References:
-  Saha et al. 2021, Algorithm 1 — GPM (papers/stage1-swr-replay/)
-  Cheng et al. 2025, Section 3.2 — Mamba-CL null-space (papers/stage1-swr-replay/)
+  Saha et al. 2021 — Gradient Projection Memory (GPM)
+  Cheng et al. — Mamba-CL null-space continual learning
 """
+
 from __future__ import annotations
 
 import torch
@@ -25,51 +24,166 @@ class NullSpaceProjector:
     def __init__(self, rank_budget: int = 200) -> None:
         """
         Args:
-            rank_budget: Maximum number of basis vectors to retain across all tasks.
+            rank_budget:
+                Maximum number of protected basis directions
+                retained across tasks.
         """
         self.rank_budget = rank_budget
-        self._U: Tensor | None = None  # shape (d_model, k), k ≤ rank_budget
+
+        # Protected basis.
+        #
+        # Shape:
+        #   (d_model, k)
+        #
+        # where:
+        #   d_model = feature dimension
+        #   k       = number of protected directions
+        self._U: Tensor | None = None
 
     def update(self, hidden_states: Tensor) -> None:
         """
-        Extend the basis U with new task's feature directions.
+        Extend the protected basis using hidden states from a completed task.
 
         Args:
-            hidden_states: Shape (N, d_model) — hidden states from the completed task.
+            hidden_states:
+                Tensor with shape (N, d_model)
 
-        Updates self._U in-place (appends new singular vectors, then truncates to
-        rank_budget if necessary).
+                N       = number of samples
+                d_model = number of hidden features
+
+        The method:
+            1. Runs SVD on hidden states.
+            2. Measures the energy of each feature-space direction.
+            3. Keeps enough directions to explain approximately 99% of energy.
+            4. Combines them with previously protected directions.
+            5. Uses QR to form an orthonormal basis.
+            6. Enforces rank_budget.
         """
-        _, S, Vt = torch.linalg.svd(hidden_states, full_matrices=False)
+
+        # --------------------------------------------------------------
+        # Step 1: Find feature-space directions using SVD
+        # --------------------------------------------------------------
+        _, S, Vt = torch.linalg.svd(
+            hidden_states,
+            full_matrices=False,
+        )
+
+        # --------------------------------------------------------------
+        # Step 2: Convert singular values to energy / variance
+        # --------------------------------------------------------------
         var = S ** 2
-        cumulative_ratio = torch.cumsum(var, dim=0) / var.sum()
-        r = int((cumulative_ratio < 0.99).sum().item()) + 1
-        r = min(r, Vt.shape[0])
+        total_var = var.sum()
+
+        # --------------------------------------------------------------
+        # Step 3: Handle zero-information hidden states
+        # --------------------------------------------------------------
+        #
+        # Example:
+        #
+        # H = [[0, 0],
+        #      [0, 0],
+        #      [0, 0]]
+        #
+        # There is no meaningful feature direction to protect.
+        # --------------------------------------------------------------
+        if total_var <= torch.finfo(var.dtype).eps:
+            return
+
+        # --------------------------------------------------------------
+        # Step 4: Calculate cumulative explained energy
+        # --------------------------------------------------------------
+        cumulative_ratio = torch.cumsum(
+            var,
+            dim=0,
+        ) / total_var
+
+        # --------------------------------------------------------------
+        # Step 5: Select enough directions to explain ~99% of energy
+        # --------------------------------------------------------------
+        r = int(
+            (cumulative_ratio < 0.99).sum().item()
+        ) + 1
+
+        r = min(
+            r,
+            Vt.shape[0],
+        )
+
+        # Vt stores feature-space directions as rows.
+        #
+        # We transpose them so that protected directions
+        # are stored as columns.
         new_dirs = Vt[:r].T
+
+        # --------------------------------------------------------------
+        # Step 6: Combine previous and new protected directions
+        # --------------------------------------------------------------
         if self._U is None:
             combined = new_dirs
         else:
-            combined = torch.cat([self._U, new_dirs], dim=1)
+            combined = torch.cat(
+                [self._U, new_dirs],
+                dim=1,
+            )
+
+        # --------------------------------------------------------------
+        # Step 7: Orthonormalise the combined basis
+        # --------------------------------------------------------------
         Q, _ = torch.linalg.qr(combined)
-        k_new = min(Q.shape[1], self.rank_budget)
+
+        # --------------------------------------------------------------
+        # Step 8: Respect the maximum protected rank
+        # --------------------------------------------------------------
+        k_new = min(
+            Q.shape[1],
+            self.rank_budget,
+        )
+
         self._U = Q[:, :k_new]
 
     def project(self, grad: Tensor) -> Tensor:
         """
-        Apply the null-space projection P = I − U @ U.T to a gradient tensor.
+        Remove gradient components lying in the protected subspace.
 
         Args:
-            grad: Gradient of the same dimension as d_model, any shape (..., d_model).
+            grad:
+                Gradient tensor whose final dimension matches d_model.
 
         Returns:
-            Projected gradient with same shape as input.
-            If no tasks have been seen yet (U is None), returns grad unchanged.
+            Projected gradient with the same shape as grad.
+
+        If no protected directions exist yet, the gradient
+        is returned unchanged.
         """
+
+        # Before the first task has been consolidated,
+        # nothing needs to be protected.
         if self._U is None:
             return grad
-        return grad - (grad @ self._U) @ self._U.T
+
+        # --------------------------------------------------------------
+        # Projection:
+        #
+        # dangerous part:
+        #     (grad @ U) @ U.T
+        #
+        # safe part:
+        #     grad - dangerous_part
+        # --------------------------------------------------------------
+        protected_component = (
+            grad @ self._U
+        ) @ self._U.T
+
+        projected_grad = grad - protected_component
+
+        return projected_grad
 
     @property
     def current_rank(self) -> int:
-        """Number of basis vectors currently stored."""
-        return 0 if self._U is None else self._U.shape[1]
+        """
+        Number of protected basis directions currently stored.
+        """
+        if self._U is None:
+            return 0
+
+        return self._U.shape[1]
