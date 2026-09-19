@@ -182,3 +182,29 @@ def test_overlapping_task_directions_are_orthonormalized():
     )
 
     assert torch.allclose(gram, identity, atol=1e-6)
+
+def test_project_rejects_incompatible_gradient_dimension():
+    """
+    The gradient's final dimension must match the feature dimension
+    represented by the protected basis U.
+    """
+    projector = NullSpaceProjector(rank_budget=2)
+
+    hidden_states = torch.tensor(
+        [
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+        ]
+    )
+
+    projector.update(hidden_states)
+
+    # U represents a 2-dimensional feature space,
+    # but this gradient has 3 values in its final dimension.
+    incompatible_grad = torch.tensor(
+        [[1.0, 2.0, 3.0]]
+    )
+
+    with pytest.raises(ValueError):
+        projector.project(incompatible_grad)    

@@ -60,46 +60,27 @@ class NullSpaceProjector:
             6. Enforces rank_budget.
         """
 
-        # --------------------------------------------------------------
-        # Step 1: Find feature-space directions using SVD
-        # --------------------------------------------------------------
+        # Step 1: Find feature-space directions using SVD.
         _, S, Vt = torch.linalg.svd(
             hidden_states,
             full_matrices=False,
         )
 
-        # --------------------------------------------------------------
-        # Step 2: Convert singular values to energy / variance
-        # --------------------------------------------------------------
+        # Step 2: Convert singular values to energy / variance.
         var = S ** 2
         total_var = var.sum()
 
-        # --------------------------------------------------------------
-        # Step 3: Handle zero-information hidden states
-        # --------------------------------------------------------------
-        #
-        # Example:
-        #
-        # H = [[0, 0],
-        #      [0, 0],
-        #      [0, 0]]
-        #
-        # There is no meaningful feature direction to protect.
-        # --------------------------------------------------------------
+        # Step 3: Handle zero-information hidden states.
         if total_var <= torch.finfo(var.dtype).eps:
             return
 
-        # --------------------------------------------------------------
-        # Step 4: Calculate cumulative explained energy
-        # --------------------------------------------------------------
+        # Step 4: Calculate cumulative explained energy.
         cumulative_ratio = torch.cumsum(
             var,
             dim=0,
         ) / total_var
 
-        # --------------------------------------------------------------
-        # Step 5: Select enough directions to explain ~99% of energy
-        # --------------------------------------------------------------
+        # Step 5: Select enough directions to explain ~99% of energy.
         r = int(
             (cumulative_ratio < 0.99).sum().item()
         ) + 1
@@ -110,14 +91,10 @@ class NullSpaceProjector:
         )
 
         # Vt stores feature-space directions as rows.
-        #
-        # We transpose them so that protected directions
-        # are stored as columns.
+        # Transpose them so directions are stored as columns.
         new_dirs = Vt[:r].T
 
-        # --------------------------------------------------------------
-        # Step 6: Combine previous and new protected directions
-        # --------------------------------------------------------------
+        # Step 6: Combine previous and new protected directions.
         if self._U is None:
             combined = new_dirs
         else:
@@ -126,14 +103,10 @@ class NullSpaceProjector:
                 dim=1,
             )
 
-        # --------------------------------------------------------------
-        # Step 7: Orthonormalise the combined basis
-        # --------------------------------------------------------------
+        # Step 7: Orthonormalise the combined basis.
         Q, _ = torch.linalg.qr(combined)
 
-        # --------------------------------------------------------------
-        # Step 8: Respect the maximum protected rank
-        # --------------------------------------------------------------
+        # Step 8: Respect the maximum protected rank.
         k_new = min(
             Q.shape[1],
             self.rank_budget,
@@ -147,33 +120,31 @@ class NullSpaceProjector:
 
         Args:
             grad:
-                Gradient tensor whose final dimension matches d_model.
+                Gradient tensor whose final dimension must match
+                the feature dimension represented by U.
 
         Returns:
             Projected gradient with the same shape as grad.
-
-        If no protected directions exist yet, the gradient
-        is returned unchanged.
         """
 
-        # Before the first task has been consolidated,
-        # nothing needs to be protected.
+        # No previous protected directions yet.
         if self._U is None:
             return grad
 
-        # --------------------------------------------------------------
-        # Projection:
-        #
-        # dangerous part:
-        #     (grad @ U) @ U.T
-        #
-        # safe part:
-        #     grad - dangerous_part
-        # --------------------------------------------------------------
+        # Ensure gradient and protected basis use the same feature dimension.
+        if grad.shape[-1] != self._U.shape[0]:
+            raise ValueError(
+                "Gradient feature dimension does not match protected basis dimension: "
+                f"grad.shape[-1]={grad.shape[-1]}, "
+                f"U.shape[0]={self._U.shape[0]}"
+            )
+
+        # Component of the gradient lying inside the protected subspace.
         protected_component = (
             grad @ self._U
         ) @ self._U.T
 
+        # Remove the protected component.
         projected_grad = grad - protected_component
 
         return projected_grad
