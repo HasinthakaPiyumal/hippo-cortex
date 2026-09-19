@@ -42,9 +42,12 @@ modal run --detach scripts/run_modal_inf_ssm.py --dataset cifar100 --batch-size 
 
 ---
 
-## Local Background Runner
+## Local Baseline Runners
 
-- `scripts/run_background_inf_ssm.py`: Detached background runner for local Linux machines using `nohup`.
+- `scripts/mamba_cl/`: Standalone runner and scripts for Mamba-CL baseline (configured for 3 epochs with automatic path validation, bash/ps1 wrappers, and full documentation).
+- `scripts/run_background.py`: Detached background runner for CIFAR-100 on Linux.
+- `scripts/run_background_imagenet.py`: Detached background runner for ImageNet-R.
+- `scripts/run_background_inf_ssm.py`: Detached background runner for Inf-SSM on Linux machines using `nohup`.
 
 ---
 
