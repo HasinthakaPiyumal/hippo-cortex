@@ -112,3 +112,73 @@ def test_zero_hidden_states_do_not_create_protected_directions():
     projector.update(hidden_states)
 
     assert projector.current_rank == 0
+
+
+def test_multiple_task_updates_accumulate_protected_directions():
+    """
+    Protected directions from multiple completed tasks should be retained.
+    """
+    projector = NullSpaceProjector(rank_budget=3)
+
+    task1_hidden = torch.tensor(
+        [
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [3.0, 0.0, 0.0],
+        ]
+    )
+
+    task2_hidden = torch.tensor(
+        [
+            [0.0, 1.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.0, 3.0, 0.0],
+        ]
+    )
+
+    projector.update(task1_hidden)
+
+    assert projector.current_rank == 1
+
+    projector.update(task2_hidden)
+
+    assert projector.current_rank == 2   
+ 
+
+def test_overlapping_task_directions_are_orthonormalized():
+    """
+    When a new task introduces a direction that overlaps with an old
+    protected direction, the stored basis should remain orthonormal.
+    """
+    projector = NullSpaceProjector(rank_budget=2)
+
+    task1_hidden = torch.tensor(
+        [
+            [1.0, 0.0],
+            [2.0, 0.0],
+            [3.0, 0.0],
+        ]
+    )
+
+    task2_hidden = torch.tensor(
+        [
+            [1.0, 1.0],
+            [2.0, 2.0],
+            [3.0, 3.0],
+        ]
+    )
+
+    projector.update(task1_hidden)
+    projector.update(task2_hidden)
+
+    U = projector._U
+
+    gram = U.T @ U
+
+    identity = torch.eye(
+        projector.current_rank,
+        dtype=U.dtype,
+        device=U.device,
+    )
+
+    assert torch.allclose(gram, identity, atol=1e-6)
