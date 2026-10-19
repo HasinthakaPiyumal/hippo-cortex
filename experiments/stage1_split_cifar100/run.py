@@ -11,7 +11,7 @@ Runs 20 sequential tasks; fills acc_matrix; logs metrics to wandb.
 
 After completing all tasks, saves:
   results/stage1_split_cifar100/acc_matrix.npy
-  results/stage1_split_cifar100/summary.json    (AA, AF, BWT, memory_mb)
+  results/stage1_split_cifar100/summary.json    (AA, AIA, FM, memory_mb)
 """
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ import wandb
 from hippocortex.utils.seed import set_seed
 from hippocortex.utils.config import load_config
 from hippocortex.utils.logging import init_wandb, get_logger
-from hippocortex.utils.metrics import build_acc_matrix, average_accuracy, average_forgetting, backward_transfer
-from hippocortex.utils.memory_tracker import measure_memory_mb
+from hippocortex.utils.metrics import ContinualMetrics
+from hippocortex.utils.memory_tracker import MemoryTracker
 from hippocortex.models.backbone import MambaBackbone
 from hippocortex.models.swr_generator import SWRGenerator
 from hippocortex.cl.stats_buffer import StatsBuffer
@@ -68,38 +68,48 @@ def main() -> None:
     trainer = Trainer(backbone, swr_gen, projector, buffer, cfg)
 
     # ── Training loop ────────────────────────────────────────────────────────
-    acc_matrix = build_acc_matrix(N_TASKS)
+    cl_metrics = ContinualMetrics(num_tasks=N_TASKS)
+    tracker = MemoryTracker(device=str(device))
+    tracker.register_swr_buffer(buffer)
+    tracker.start()
 
     for task_id in range(N_TASKS):
         _log.info("── Task %d / %d ──", task_id + 1, N_TASKS)
 
+        tracker.task_start(task_id)
         train_loader = get_task_loaders(task_id, "train", cfg.dataset.root, cfg.training.batch_size)
         metrics = trainer.train_task(task_id, train_loader)
+        tracker.task_end(task_id)
         wandb.log({"task": task_id, **metrics})
 
         # Evaluate on all tasks seen so far
         for eval_id in range(task_id + 1):
             test_loader = get_task_loaders(eval_id, "test", cfg.dataset.root, cfg.training.batch_size)
             acc = trainer.evaluate(eval_id, test_loader)
-            acc_matrix[task_id, eval_id] = acc
+            cl_metrics.record(task_id, eval_id, acc)
             wandb.log({f"acc/task_{eval_id}_after_{task_id}": acc})
+
+    tracker.stop()
 
     # ── Save results ─────────────────────────────────────────────────────────
     save_dir = Path(cfg.logging.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
 
-    np.save(save_dir / "acc_matrix.npy", acc_matrix)
+    np.save(save_dir / "acc_matrix.npy", cl_metrics.result_matrix.to_tensor().numpy())
 
+    cl_summary = cl_metrics.summary()
+    mem_summary = tracker.summary()
     summary = {
-        "AA": average_accuracy(acc_matrix),
-        "AF": average_forgetting(acc_matrix),
-        "BWT": backward_transfer(acc_matrix),
-        "memory_mb": measure_memory_mb(buffer),
+        "AA": cl_summary["final_aa"],
+        "AIA": cl_summary["final_aia"],
+        "FM": cl_summary["final_fm"],
+        "memory_mb": buffer.memory_bytes() / (1024 ** 2),
+        "peak_gpu_mb": mem_summary["peak_gpu_mb"],
         "seed": cfg.seed,
     }
     (save_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
-    _log.info("Done. AA=%.4f  AF=%.4f  BWT=%.4f", summary["AA"], summary["AF"], summary["BWT"])
+    _log.info("Done. AA=%.4f  AIA=%.4f  FM=%.4f", summary["AA"], summary["AIA"], summary["FM"])
     wandb.log(summary)
     wandb.finish()
 
