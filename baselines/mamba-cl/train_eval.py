@@ -70,7 +70,7 @@ def get_args():
     parser.add_argument('-t', '--num_tasks', type=int, default=10, choices=(1, 2, 5, 10, 20, 25, 50, 100))
     parser.add_argument('--shuffle_classes', type=misc.str2bool, default=True)
     parser.add_argument('--seed', type=int, default=2024)
-    parser.add_argument('-m', '--model', type=str, default='defocus_mamba_large', help='')
+    parser.add_argument('-m', '--model', type=str, default='defocus_mamba_large', choices=('defocus_mamba_large', 'defocus_mamba_base'), help='backbone; config read from utils/<model>.yaml (large uses the 22k config)')
     parser.add_argument('--pretrained_path', type=str, default="../datasets/defocus_mamba_large_cls_21k.pth", help='')
     parser.add_argument('--head_dim_type', type=str, choices=('task_classes', 'pretrained', 'text_dim'), default='task_classes')
     parser.add_argument('--logit_type', type=str, choices=('head_out', 'sim_imgtext'), default='head_out')
@@ -599,7 +599,7 @@ def extract_class_features(GVM: GlobalVarsManager, model: DefocusAttentionNetwor
     dataset = define_dataset(GVM, GVM.cl_mngr.current_task_classes, training=True, transform_type=args.transform_type, target_map_to_local=False, use_eval_transform=True, expand_times=1)
     dataloader = DataLoader(dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=args.eval_workers, pin_memory=True, timeout=args.timeout if args.eval_workers > 0 else 0)
 
-    feats = torch.empty([len(dataset), 1024], dtype=torch.float32)
+    feats = torch.empty([len(dataset), model.embed_dim], dtype=torch.float32)
     label = torch.empty([len(dataset)], dtype=torch.long)
 
     smp_idx = 0
@@ -722,11 +722,13 @@ if __name__ == "__main__":
     for taskid, current_task_classes in GVM.cl_mngr:
         if taskid == 0:
             import os
-            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils/defocus_mamba_large_22k.yaml")
+            cfg_name = "defocus_mamba_large_22k.yaml" if args.model == 'defocus_mamba_large' else f"{args.model}.yaml"
+            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils", cfg_name)
             model: DefocusAttentionNetwork = build_model(get_config(config_path))
 
             ckpt = torch.load(args.pretrained_path, map_location='cpu')
-            model.load_state_dict(ckpt['model'], strict=False)
+            load_info = model.load_state_dict(ckpt['model'], strict=False)
+            print(f":: loaded {args.model}: missing keys {load_info.missing_keys}, unexpected keys {load_info.unexpected_keys}")
             setattr(model, 'pretrained_cfg', {})
             model.pretrained_cfg['pretrained_path'] = args.pretrained_path
             GVM.cache_dict['pretrained_cfg'] = deepcopy(model.pretrained_cfg)

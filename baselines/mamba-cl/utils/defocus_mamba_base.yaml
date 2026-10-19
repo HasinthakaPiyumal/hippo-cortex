@@ -1,0 +1,20 @@
+MODEL:
+  TYPE: mamba
+  NAME: defocus_mamba_base
+  depth: 24
+  NUM_CLASSES: 1000
+  drop_path_rate: 0.
+  min_drop_path_rate: 0.
+  use_scheduled_drop_path: False
+  head_type: IN1k_cls
+  use_aux_loss: False
+  use_rope: True
+  MAMBA:
+    intermediate_size: 1536
+    conv_kernel: 4
+    group_norm_size: 64
+TRAIN:
+  USE_CHECKPOINT: True
+DATA:
+  IMG_SIZE: 224
+bfloat16: True
