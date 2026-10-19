@@ -84,3 +84,5 @@ docs/thesis/thesis.pdf
 docs/thesis/intermediate_report.zip
 
 .agents/
+# Claude Code per-machine settings and worktrees
+.claude/
