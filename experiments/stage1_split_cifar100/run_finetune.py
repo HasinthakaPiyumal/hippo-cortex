@@ -36,7 +36,7 @@ import torchvision.transforms as transforms
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from utils.metrics import average_accuracy, average_incremental_accuracy, forgetting_measure
+from hippocortex.utils.metrics import ContinualMetrics
 
 CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
 CIFAR100_STD  = (0.2675, 0.2565, 0.2761)
@@ -149,6 +149,7 @@ def run(args: argparse.Namespace) -> dict:
 
     T = args.n_tasks
     R: List[List[float]] = [[0.0] * T for _ in range(T)]
+    cl_metrics = ContinualMetrics(num_tasks=T)
 
     test_loaders = [
         DataLoader(
@@ -193,11 +194,14 @@ def run(args: argparse.Namespace) -> dict:
         for j in range(task_idx + 1):
             acc = _evaluate(model, test_loaders[j], device)
             R[task_idx][j] = acc
+            # ContinualMetrics expects fractions in [0, 1]; R stays in percent.
+            cl_metrics.record(task_idx, j, acc / 100.0)
             print(f"    task {j + 1:3d} accuracy: {acc:.2f}%")
 
-    aa  = average_accuracy(R)
-    aia = average_incremental_accuracy(R)
-    fm  = forgetting_measure(R)
+    cl_summary = cl_metrics.summary()
+    aa  = 100.0 * cl_summary["final_aa"]
+    aia = 100.0 * cl_summary["final_aia"]
+    fm  = 100.0 * cl_summary["final_fm"]
 
     print(f"\n{'='*60}")
     print("FINAL METRICS  (Seq / naive fine-tuning lower bound)")

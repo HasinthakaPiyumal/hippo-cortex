@@ -11,7 +11,7 @@ This script evaluates Mamba-CL checkpoints using HippoCortex's own data loaders
 so the comparison in Paper 1 Table 1 is apples-to-apples.
 
 Output columns:
-    method, task_id, accuracy, AA, AF, BWT, memory_mb, ckpt_commit, eval_date
+    method, task_id, accuracy, AA, AIA, FM, memory_mb, ckpt_commit, eval_date
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 
 from hippocortex.utils.config import load_config
-from hippocortex.utils.metrics import build_acc_matrix, average_accuracy, average_forgetting, backward_transfer
+from hippocortex.utils.metrics import ContinualMetrics
 from hippocortex.data.split_cifar100 import get_task_loaders, N_TASKS
 
 _CONFIG = Path(__file__).parent / "config.yaml"
@@ -51,7 +51,7 @@ def main() -> None:
 
     # Write CSV
     csv_path = _SAVE_DIR / "baselines.csv"
-    fieldnames = ["method", "AA", "AF", "BWT", "memory_mb", "ckpt_commit", "eval_date"]
+    fieldnames = ["method", "AA", "AIA", "FM", "memory_mb", "ckpt_commit", "eval_date"]
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
