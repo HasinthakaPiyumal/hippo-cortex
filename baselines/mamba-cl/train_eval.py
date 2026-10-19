@@ -110,6 +110,7 @@ def get_args():
     parser.add_argument('--decay_epochs', type=int, default=1000)
     parser.add_argument('--decay_rate', type=float, default=0.1)
     parser.add_argument('--use_wandb', action='store_true', help='Use wandb for logging')
+    parser.add_argument('--progress_interval', type=float, default=0, help='seconds between tqdm progress updates; 0 disables the bars')
     args = parser.parse_args()
 
     if args.interp_mode == 'auto':
@@ -188,7 +189,7 @@ def train_one_epoch(GVM: GlobalVarsManager, curr_epoch: int, dataloader: DataLoa
     scalar_meter = misc.ScalarMeter(loss="samp_avg:.4f", batch_time="step_sum:.3f", acc_top1="samp_avg:>6.2%")
     _btimer = ttime()
 
-    for i_batch, (images, target) in tqdm.tqdm(enumerate(dataloader, 1), total=len(dataloader), dynamic_ncols=True, disable=True):
+    for i_batch, (images, target) in tqdm.tqdm(enumerate(dataloader, 1), total=len(dataloader), desc=f"Task [{GVM.cl_mngr.current_taskid + 1}] epoch [{curr_epoch}] train", dynamic_ncols=True, disable=args.progress_interval <= 0, mininterval=args.progress_interval):
         images: Tensor = images.cuda(non_blocking=True)
         target: Tensor = target.cuda(non_blocking=True)
 
@@ -282,10 +283,13 @@ def train_one_task(GVM: GlobalVarsManager, taskid: int, task_classes: list[int],
     cache_state(GVM, taskid, epoch, model, optimizer, scheduler)
 
     if args.use_null_space and taskid + 1 < GVM.cl_mngr.num_tasks:
+        _nstimer = ttime()
+        print(f"Task [{taskid + 1:>{len(_ntstr)}}/{_ntstr}]:: null-space update started", flush=True)
         new_interm_tensor_dict = get_interm_tensor_dict(GVM, model, GVM.cache_dict['null_param_id_dict'])
         GVM.cache_dict['interm_tensor_dict'] = accumulate_interm_tensor_dict(GVM, GVM.cache_dict['interm_tensor_dict'], new_interm_tensor_dict)
         del new_interm_tensor_dict
         GVM.cache_dict['update_proj_dict'] = get_update_projection_dict(GVM, GVM.cache_dict['null_param_id_dict'], GVM.cache_dict['interm_tensor_dict'])
+        print(f"Task [{taskid + 1:>{len(_ntstr)}}/{_ntstr}]:: null-space update took {misc.format_duration(ttime() - _nstimer)}", flush=True)
 
     if args.refine_head:
         extract_class_features(GVM, model)
@@ -307,7 +311,7 @@ def evaluate_one_task(GVM: GlobalVarsManager, train_taskid: int, eval_taskid: in
     set_model_mode(GVM, model, training=False)
     scalar_meter = misc.ScalarMeter(acc_class_inc="samp_avg:>6.2%")
 
-    for images, target in tqdm.tqdm(dataloader, total=len(dataloader), dynamic_ncols=True, disable=True):
+    for images, target in tqdm.tqdm(dataloader, total=len(dataloader), desc=f"Task [{train_taskid + 1}] eval task [{eval_taskid + 1}]", dynamic_ncols=True, disable=GVM.args.progress_interval <= 0, mininterval=GVM.args.progress_interval):
         images: Tensor = images.cuda(non_blocking=True)
         target: Tensor = target.cuda(non_blocking=True)
 
@@ -489,7 +493,7 @@ def get_interm_tensor_dict(GVM: GlobalVarsManager, model: DefocusAttentionNetwor
 
     dataloader = DataLoader(train_dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=args.eval_workers, pin_memory=True, timeout=args.timeout if args.eval_workers > 0 else 0)
 
-    for nb, (img, _) in enumerate(dataloader, 1):
+    for nb, (img, _) in tqdm.tqdm(enumerate(dataloader, 1), total=len(dataloader), desc="null-space: collect intermediates", dynamic_ncols=True, disable=args.progress_interval <= 0, mininterval=args.progress_interval):
         with torch.no_grad():
             img: Tensor
             model(img.cuda(non_blocking=True))
@@ -568,7 +572,7 @@ def get_update_projection_dict(GVM: GlobalVarsManager, null_param_id_dict: dict,
 
     svals_dict = OrderedDict()
     zero_idx_dict = OrderedDict()
-    for _pid in interm_tensor_dict.keys():
+    for _pid in tqdm.tqdm(interm_tensor_dict.keys(), total=len(interm_tensor_dict), desc="null-space: SVD projections", dynamic_ncols=True, disable=GVM.args.progress_interval <= 0, mininterval=GVM.args.progress_interval):
         update_proj_dict[_pid] = {}
         for _mname in interm_tensor_dict[_pid].keys():
             U, S, Vt = torch.linalg.svd(interm_tensor_dict[_pid][_mname], full_matrices=True)  # A=U@diag(S)@Vt
