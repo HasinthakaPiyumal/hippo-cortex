@@ -709,7 +709,7 @@ if __name__ == "__main__":
             import wandb
             wandb.init(
                 project="mamba-cl-baseline",
-                name=f"mamba_cl_{args.dataset}_seed_{args.seed}",
+                name=f"mamba_cl_{args.model}_{args.dataset}_t{args.num_tasks}_e{args.epochs}_seed_{args.seed}",
                 config=vars(args)
             )
         except ImportError:
