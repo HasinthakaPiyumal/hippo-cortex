@@ -99,6 +99,7 @@ def get_args():
     parser.add_argument('-et', '--expand_times', type=int, default=5)
     parser.add_argument('--temperature', type=float, default=1)
     parser.add_argument('--use_amp', type=misc.str2bool, default=False)
+    parser.add_argument('--data_parallel', type=misc.str2bool, default=False, help='split each train/eval batch across all visible GPUs (nn.DataParallel); null-space collection stays on one GPU')
     parser.add_argument('--sample_type', type=str, choices=('path', 'image'), default='image')
     parser.add_argument('--timeout', type=int, default=30)
     parser.add_argument('--persistent_workers', type=misc.str2bool, default=False)
@@ -189,6 +190,13 @@ def set_learning_rates(GVM: GlobalVarsManager, model: DefocusAttentionNetwork, b
     return param_lr_groups
 
 
+def forward_module(GVM: GlobalVarsManager, model: DefocusAttentionNetwork) -> nn.Module:
+    # DataParallel only wraps the forward pass: parameters, optimizer and checkpoints stay on the plain model
+    if GVM.args.data_parallel and torch.cuda.device_count() > 1:
+        return nn.DataParallel(model)
+    return model
+
+
 def train_one_epoch(GVM: GlobalVarsManager, curr_epoch: int, dataloader: DataLoader, model: DefocusAttentionNetwork, criterion: nn.CrossEntropyLoss, optimizer: torch.optim.Optimizer) -> str:
     args = GVM.args
     temperature: float = args.temperature
@@ -198,13 +206,14 @@ def train_one_epoch(GVM: GlobalVarsManager, curr_epoch: int, dataloader: DataLoa
     amp_scalar = GradScaler(enabled=use_amp)
     scalar_meter = misc.ScalarMeter(loss="samp_avg:.4f", batch_time="step_sum:.3f", acc_top1="samp_avg:>6.2%")
     _btimer = ttime()
+    fwd = forward_module(GVM, model)
 
     for i_batch, (images, target) in tqdm.tqdm(enumerate(dataloader, 1), total=len(dataloader), desc=f"Task [{GVM.cl_mngr.current_taskid + 1}] epoch [{curr_epoch}] train", dynamic_ncols=True, disable=args.progress_interval <= 0, mininterval=args.progress_interval):
         images: Tensor = images.cuda(non_blocking=True)
         target: Tensor = target.cuda(non_blocking=True)
 
         with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
-            logits: Tensor = model(images)
+            logits: Tensor = fwd(images)
 
         if i_batch == 1:
             if args.seperate_head:
@@ -329,6 +338,7 @@ def evaluate_one_task(GVM: GlobalVarsManager, train_taskid: int, eval_taskid: in
     dataloader = DataLoader(dataset, batch_size=GVM.args.eval_batch_size, shuffle=False, num_workers=GVM.args.eval_workers, pin_memory=True, timeout=GVM.args.timeout if GVM.args.eval_workers > 0 else 0)
 
     set_model_mode(GVM, model, training=False)
+    fwd = forward_module(GVM, model)
     scalar_meter = misc.ScalarMeter(acc_class_inc="samp_avg:>6.2%")
 
     for images, target in tqdm.tqdm(dataloader, total=len(dataloader), desc=f"Task [{train_taskid + 1}] eval task [{eval_taskid + 1}]", dynamic_ncols=True, disable=GVM.args.progress_interval <= 0, mininterval=GVM.args.progress_interval):
@@ -337,7 +347,7 @@ def evaluate_one_task(GVM: GlobalVarsManager, train_taskid: int, eval_taskid: in
 
         with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
             with torch.no_grad():
-                logits: Tensor = model(images)
+                logits: Tensor = fwd(images)
 
         assert logits.ndim == 2
         assert logits.shape[1] == len(GVM.cl_mngr.sofar_task_classes), f"{logits.shape}, {len(GVM.cl_mngr.sofar_task_classes)}"
@@ -900,6 +910,8 @@ if __name__ == "__main__":
     GVM.cache_dict['exp_start_time'] = ttime()
 
     model = build_pretrained_model(GVM)
+    if args.data_parallel:
+        print(f":: data_parallel: train/eval batches split across {torch.cuda.device_count()} GPU(s)")
     tasks_done = setup_checkpointing(GVM, model)
     if tasks_done == GVM.cl_mngr.num_tasks:
         print(f":: all {tasks_done} tasks already done; results in {GVM.run_dir}/{RESULTS}")
