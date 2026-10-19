@@ -15,7 +15,15 @@ from pathlib import Path
 
 
 def download_cifar100(root: Path) -> None:
-    cifar_dir = root / "cifar100"
+    fetch_cifar100(root / "cifar100")
+
+
+def fetch_cifar100(cifar_dir: Path) -> None:
+    """Download and extract CIFAR-100 into ``cifar_dir/cifar-100-python``.
+
+    Also used by ``hippocortex.data.split_cifar100.download_if_missing``.
+    """
+    cifar_dir = Path(cifar_dir)
     cifar_dir.mkdir(parents=True, exist_ok=True)
     tar_file = cifar_dir / "cifar-100-python.tar.gz"
     extract_dir = cifar_dir / "cifar-100-python"
