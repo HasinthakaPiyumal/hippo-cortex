@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import random
+import uuid
 from collections import OrderedDict
 import tqdm
 from typing import Any, Literal
@@ -892,7 +893,7 @@ def init_wandb(GVM: GlobalVarsManager) -> None:
         with open(_id_path) as f:
             run_id = f.read().strip()
     else:
-        run_id = wandb.util.generate_id()
+        run_id = uuid.uuid4().hex[:12]  # wandb.util.generate_id is gone in newer wandb releases
     wandb.init(project="mamba-cl-baseline", name=run_name(GVM.args), config=vars(GVM.args), id=run_id, resume='allow')
     if _id_path and not os.path.exists(_id_path):
         with open(_id_path, 'w') as f:
