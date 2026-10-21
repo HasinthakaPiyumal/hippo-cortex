@@ -118,6 +118,8 @@ def get_args():
     p.add_argument('-jt', '--workers', type=int, default=8)
     p.add_argument('--use_amp', type=str2bool, default=False, help='fp16 autocast; the paper runs in fp32')
     p.add_argument('--data_parallel', type=str2bool, default=False, help='split each batch across all visible GPUs (nn.DataParallel)')
+    p.add_argument('--micro_batch', type=int, default=0, help='run each batch in chunks of this size (summed over GPUs) with gradient '
+                                                              'accumulation; same update as the full batch, less memory. 0 = off')
     p.add_argument('--grad_ckpt', type=str2bool, default=False, help='recompute each Vim block in backward: much less memory, ~30%% slower')
     # logging and checkpoints
     p.add_argument('--use_wandb', action='store_true')
@@ -346,29 +348,37 @@ def train_one_epoch(R: Run, t: int, epoch: int, model: nn.Module, old_net: nn.Mo
         else:
             targets = nn.functional.one_hot(targets, args.nb_classes).float() * (1 - args.smoothing) + args.smoothing / args.nb_classes
 
-        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=args.use_amp):
-            outputs, penalty = fwd(samples)
-            penalty = penalty.mean()
-            outputs = outputs[:, pc:ac]
-            targets = targets[:, pc:ac] / targets[:, pc:ac].sum(dim=1, keepdim=True)  # back to sum = 1
-            loss = criterion(outputs, targets) + penalty
+        targets = targets[:, pc:ac] / targets[:, pc:ac].sum(dim=1, keepdim=True)  # back to sum = 1
 
-        loss_value = loss.item()
+        # The batch is mixed as a whole (as in the official code), then optionally run in micro-batches. Both loss
+        # terms are batch means, so weighting each chunk by its share gives exactly the full-batch gradient.
+        loss_value, penalty_value, correct = 0., 0., 0
+        mb = args.micro_batch or samples.shape[0]
+        for xs, ts in zip(samples.split(mb), targets.split(mb)):
+            w = xs.shape[0] / samples.shape[0]
+            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=args.use_amp):
+                outputs, penalty = fwd(xs)
+                penalty = penalty.mean()
+                outputs = outputs[:, pc:ac]
+                loss = criterion(outputs, ts) + penalty
+            scaler.scale(loss * w).backward()
+            loss_value += loss.item() * w
+            penalty_value += penalty.item() * w
+            correct += (outputs.detach().argmax(dim=1) == ts.argmax(dim=1)).sum().item()
+
         if not math.isfinite(loss_value):
             print(f"Loss is {loss_value}, stopping training", flush=True)
             sys.exit(1)
-        scaler.scale(loss).backward()
         if args.clip_grad is not None:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
         scaler.step(optimizer)
         scaler.update()
 
-        with torch.no_grad():
-            sums['correct'] += (outputs.argmax(dim=1) == targets.argmax(dim=1)).sum().item()
+        sums['correct'] += correct
         sums['count'] += samples.shape[0]
         sums['loss'] += loss_value
-        sums['reg_loss'] += penalty.item()
+        sums['reg_loss'] += penalty_value
         sums['steps'] += 1
 
     n = max(sums['steps'], 1)
@@ -492,7 +502,8 @@ def main():
         raise SystemExit(f"mamba CUDA kernels unavailable: {KERNEL_IMPORT_ERRORS}")
     print(f":: run {run_name(args)}")
     print(f":: lr={args.lr:g} warmup_lr={args.warmup_lr:g} min_lr={args.min_lr:g} task_lr_scaling={args.task_lr_scaling:g} "
-          f"reg_lambda={args.reg_lambda:g} batch={args.batch_size} epochs={args.epochs} amp={args.use_amp} grad_ckpt={args.grad_ckpt}")
+          f"reg_lambda={args.reg_lambda:g} batch={args.batch_size} micro_batch={args.micro_batch or args.batch_size} epochs={args.epochs} "
+          f"amp={args.use_amp} grad_ckpt={args.grad_ckpt}")
     if args.data_parallel:
         print(f":: data_parallel: batches split across {torch.cuda.device_count()} GPU(s)")
 
