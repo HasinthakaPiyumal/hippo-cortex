@@ -21,6 +21,8 @@ from timm.layers import DropPath, trunc_normal_, lecun_normal_
 from torch import nn, Tensor
 from torch.utils.checkpoint import checkpoint
 
+import abar_triton
+
 KERNEL_IMPORT_ERRORS = {}  # why a kernel is unavailable, for the Kaggle setup check
 try:
     from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
@@ -75,35 +77,54 @@ def _upcast(x: Tensor) -> Tensor:
     return x.float() if x.dtype in (torch.float16, torch.bfloat16) else x
 
 
+def _abar_fwd_torch(delta: Tensor, A: Tensor) -> Tensor:
+    """Reference A_bar, looped over n so the (b, d, l, n) tensor is never held in memory."""
+    sp = F.softplus(_upcast(delta))
+    return torch.stack([torch.exp(sp * A[:, n, None]).mean(dim=1) for n in range(A.shape[1])], dim=-1)
+
+
+def _abar_bwd_torch(delta: Tensor, A: Tensor, grad: Tensor):
+    d32 = _upcast(delta)
+    sp = F.softplus(d32)
+    n_inner = delta.shape[1]
+    grad = _upcast(grad)
+    g_delta = torch.zeros_like(d32)
+    g_A = torch.zeros_like(A)
+    for n in range(A.shape[1]):
+        e = torch.exp(sp * A[:, n, None]) * grad[:, None, :, n]  # (b, d, l)
+        g_A[:, n] = (e * sp).sum(dim=(0, 2)) / n_inner
+        g_delta += e * A[:, n, None]
+    return g_delta * torch.sigmoid(d32) / n_inner, g_A
+
+
+def _use_triton(delta: Tensor, A: Tensor) -> bool:
+    return (delta.is_cuda and abar_triton.triton is not None and delta.dtype != torch.float64 and A.dtype == torch.float32
+            and delta.stride(-1) == 1 and abar_triton.available(_abar_fwd_torch, _abar_bwd_torch, delta.device))
+
+
 class _MeanDiscreteA(torch.autograd.Function):
     """A_bar[b, l, n] = mean_d exp(softplus(delta[b, d, l]) * A[d, n]).
 
-    Same value and gradients as `A_bar` in the official `MambaInnerFnNoOutProj_state`, but looped
-    over the state index n so the (b, d, l, n) tensor is never held in memory. As in the official
-    code, `delta` is the dt projection *before* `dt_proj.bias` is added (the scan kernel itself
-    does add the bias).
+    Same value and gradients as `A_bar` in the official `MambaInnerFnNoOutProj_state`. As in the official
+    code, `delta` is the dt projection *before* `dt_proj.bias` is added (the scan kernel itself does add
+    the bias). On GPU it uses the fused Triton kernels of abar_triton.py once they have been checked
+    against the PyTorch version below.
     """
 
     @staticmethod
     def forward(ctx, delta: Tensor, A: Tensor) -> Tensor:
         ctx.save_for_backward(delta, A)
-        sp = F.softplus(_upcast(delta))
-        return torch.stack([torch.exp(sp * A[:, n, None]).mean(dim=1) for n in range(A.shape[1])], dim=-1)
+        if _use_triton(delta, A):
+            return abar_triton.abar_fwd(delta, A)
+        return _abar_fwd_torch(delta, A)
 
     @staticmethod
     def backward(ctx, grad: Tensor):
         delta, A = ctx.saved_tensors
-        d32 = _upcast(delta)
-        sp = F.softplus(d32)
-        n_inner = delta.shape[1]
-        grad = _upcast(grad)
-        g_delta = torch.zeros_like(d32)
-        g_A = torch.zeros_like(A)
-        for n in range(A.shape[1]):
-            e = torch.exp(sp * A[:, n, None]) * grad[:, None, :, n]  # (b, d, l)
-            g_A[:, n] = (e * sp).sum(dim=(0, 2)) / n_inner
-            g_delta += e * A[:, n, None]
-        g_delta = g_delta * torch.sigmoid(d32) / n_inner
+        if _use_triton(delta, A):
+            g_delta, g_A = abar_triton.abar_bwd(delta, A, grad)
+        else:
+            g_delta, g_A = _abar_bwd_torch(delta, A, grad)
         return g_delta.to(delta.dtype), g_A
 
 
