@@ -1,821 +1,536 @@
-import sys
+"""Inf-SSM baseline: class-incremental training and evaluation of Vim-small.
+
+Follows vim/main.py + vim/cl_methods/inf_ssm.py of the official code
+(https://github.com/isaacNingLee/Inf-SSM, CVPR 2026), with three additions for Kaggle:
+resumable checkpoints mirrored to Hugging Face, nn.DataParallel over all visible GPUs, and
+optional per-block gradient checkpointing to fit Vim-small in 16 GB.
+
+Protocol (as in the official scripts):
+- Task 0 is not trained: training starts from a Vim-small checkpoint already fine-tuned on task 0
+  (`--finetune hf` downloads the authors' one, seed 0 only). `--full_run` trains task 0 too,
+  e.g. from the ImageNet Vim-small weights (`--finetune vim_small_in1k`).
+- Each task t >= 1: fresh AdamW + cosine schedule, 40 epochs, logits restricted to the task's
+  classes, loss = soft-target CE (mixup/cutmix) + Inf-SSM penalty against the model after task t-1.
+  After each epoch the current-task val accuracy is measured; the best epoch is reloaded at the end.
+- The base LR is multiplied by --task_lr_scaling at every task boundary, task 0 included.
+- After each task: class-incremental (and task-incremental) test accuracy on all tasks so far.
+  AA = mean accuracy after the last task, AIA = mean of AA over tasks, FM = mean forgetting.
+"""
 import argparse
+import json
+import math
+import os
 import random
-from collections import OrderedDict
-import tqdm
-from typing import Any, Literal
+import sys
+import uuid
 from copy import deepcopy
 from time import time as ttime
-import inspect
-import scipy.ndimage
-import warnings
-warnings.filterwarnings('ignore')
 
 import numpy as np
 import torch
-from torch import nn, Tensor
-from torch.cuda.amp.grad_scaler import GradScaler
-import torch.utils.hooks
-from torch.utils.data import DataLoader, TensorDataset
-import torch.linalg
-import torchvision
-from einops import rearrange
+import tqdm
+from timm.data import Mixup
+from timm.loss import SoftTargetCrossEntropy
 from timm.optim import create_optimizer_v2
 from timm.scheduler import create_scheduler_v2
+from torch import nn, Tensor
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
-from utils.mod_adam import ModAdam
-from utils.config import build_model, get_config
-from utils.dataset_builder import ImagePathDatasetClassManager, ImagePathDataset, define_dataset
-from utils.continual_manager import ClassIncrementalManager
-from utils import misc
+from cl_datasets import build_cl_splits
+from inf_ssm import InfSSMForward
+from mamba_vim import MODELS, load_finetune
 
-import utils.mamba_block
-import utils.defocus_attention_network
-from utils.defocus_attention_network import DefocusAttentionNetwork
+CKPT_TASK, CKPT_EPOCH, CKPT_BEST = "task_end.pt", "epoch.pt", "task_best.pt"
+RESULTS, WANDB_ID = "results.json", "wandb_id.txt"
+NUM_CLASSES = {'cifar100': 100, 'imagenet_r': 200, 'caltech256': 250}
 
-torch.set_float32_matmul_precision("high")
+# Hyperparameters of the official launch scripts (vim/scripts/*.sh = paper Tables 12/13).
+# Common to all: batch 128, 40 epochs, weight decay 0.1, drop path 0.
+PRESETS = {
+    ('cifar100', 10): dict(lr=1e-5, warmup_lr=1e-6, min_lr=1e-7, task_lr_scaling=0.5, reg_lambda=3e4, hf_dir='cifar100_10task'),
+    ('cifar100', 5): dict(lr=1e-5, warmup_lr=1e-6, min_lr=1e-7, task_lr_scaling=0.5, reg_lambda=2e5, hf_dir='cifar100_5task'),
+    ('imagenet_r', 10): dict(lr=5e-4, warmup_lr=1e-4, min_lr=1e-5, task_lr_scaling=0.25, reg_lambda=2.5e5, hf_dir='10task'),
+    ('imagenet_r', 5): dict(lr=5e-4, warmup_lr=1e-4, min_lr=1e-5, task_lr_scaling=0.25, reg_lambda=1e6, hf_dir='5task'),
+    ('caltech256', 10): dict(lr=1e-4, warmup_lr=1e-4, min_lr=1e-5, task_lr_scaling=0.5, reg_lambda=2.5e6, hf_dir='caltech256_10task'),
+    ('caltech256', 5): dict(lr=1e-4, warmup_lr=1e-4, min_lr=1e-5, task_lr_scaling=0.5, reg_lambda=2.5e6, hf_dir='caltech256_5task'),
+}
+TASK0_HF_REPO = "ileening0022/Inf-SSM"  # the authors' task-0 checkpoints: <hf_dir>/task_0_checkpoint_seed_<seed>.pth
+VIM_SMALL_IN1K = ("hustvl/Vim-small-midclstok", "vim_s_midclstok_80p5acc.pth")
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')  # CPU only for smoke tests
 
 
-class GlobalVarsManager:
-    args: argparse.Namespace
-    path_data_dict: dict[str, ImagePathDataset]
-    cl_mngr: ClassIncrementalManager
-    acc_mat_dict: OrderedDict[str, np.ndarray]
-    cache_dict: dict
-    param_dict: dict[Literal['base_params', 'task_params_'], OrderedDict[str, Tensor]]
-    label_map_g2l: dict[int, tuple[int, int, int]]  # {original_label: (taskid, local_label, global_label)}
-
-    def init_from_args(self, args, this_file=__file__):
-        self.args = args
-        _dataset_class_manager = ImagePathDatasetClassManager(**{args.dataset: args.data_root})
-        self.path_data_dict = {'train': _dataset_class_manager[args.dataset](train=True),
-                               'eval': _dataset_class_manager[args.dataset](train=False)}
-        self.cl_mngr = ClassIncrementalManager(self.path_data_dict['eval'].class_list, args.num_tasks, args.seed, shuffle=args.shuffle_classes)
-        self.acc_mat_dict = OrderedDict(AccClassIncMat=np.zeros([_nt := self.cl_mngr.num_tasks, _nt]), AccClassIncList=np.zeros([_nt]))
-        self.cache_dict = {}
-        self.param_dict = {}
-        self.label_map_g2l = {}
-
-    def update_label_maps(self, taskid: int, task_classes: list[int]) -> tuple[dict[int, int], dict[str, int]]:
-        _g2l_map = misc.make_label_maps(taskid, task_classes)
-        if not all([_k not in self.label_map_g2l.keys() for _k in _g2l_map.keys()]):
-            print("The global_to_local label map has been fully loaded, which is not expected.")
-        self.label_map_g2l.update(_g2l_map)
-        return _g2l_map
+def str2bool(v: str) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    if v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description='Class-incremental Learning')
-    parser.add_argument('-d', '--dataset', type=str, required=True, choices=('cifar100', 'imagenet_r', 'sdomainet'), help='use lowercase')
-    parser.add_argument('-dr', '--data_root', type=str, default="")
-    parser.add_argument('-t', '--num_tasks', type=int, default=10, choices=(1, 2, 5, 10, 20, 25, 50, 100))
-    parser.add_argument('--shuffle_classes', type=misc.str2bool, default=True)
-    parser.add_argument('--seed', type=int, default=2024)
-    parser.add_argument('-m', '--model', type=str, default='defocus_mamba_large', help='')
-    parser.add_argument('--pretrained_path', type=str, default="../datasets/defocus_mamba_large_cls_21k.pth", help='')
-    parser.add_argument('--head_dim_type', type=str, choices=('task_classes', 'pretrained', 'text_dim'), default='task_classes')
-    parser.add_argument('--logit_type', type=str, choices=('head_out', 'sim_imgtext'), default='head_out')
-    parser.add_argument('--seperate_head', type=misc.str2bool, default=True)
-    parser.add_argument('--pretrained_exp', type=str, default="")
-    parser.add_argument('--pretrained_ignore_patterns', type=str, nargs="*", default=[])
-    parser.add_argument('--use_inf_ssm', type=misc.str2bool, default=True, help='enable Inf-SSM regularization')
-    parser.add_argument('--inf_ssm_lambda', type=float, default=2e5, help='regularization strength for Inf-SSM')
-    parser.add_argument('--refine_head', type=misc.str2bool, default=False)
-    parser.add_argument('--rand_conv', type=misc.str2bool, default=True)
-    parser.add_argument('--refine_epochs', type=int, default=20)
-    parser.add_argument('--transform_type', type=str, choices=('timm', 'autoaug',), default='autoaug')
-    parser.add_argument('--interp_mode', type=str, choices=('auto', 'bilinear', 'bicubic'), default='auto')
-    parser.add_argument('-e', '--epochs', type=int, default=10)
-    parser.add_argument('-b', '--batch_size', type=int, default=200)
-    parser.add_argument('-jt', '--workers', type=int, default=16)
-    parser.add_argument('-je', '--eval_workers', type=int, default=2)
-    parser.add_argument('-et', '--expand_times', type=int, default=5)
-    parser.add_argument('--temperature', type=float, default=1)
-    parser.add_argument('--use_amp', type=misc.str2bool, default=False)
-    parser.add_argument('--sample_type', type=str, choices=('path', 'image'), default='image')
-    parser.add_argument('--timeout', type=int, default=30)
-    parser.add_argument('--persistent_workers', type=misc.str2bool, default=False)
-    parser.add_argument('--training_string', type=str, nargs='+', default=('head', 'x_proj', 'out_proj.weight', 'A_log'))
-    parser.add_argument('-eb', '--eval_batch_size', type=int, default=100)
-    parser.add_argument('--lr', '--learning_rate', type=float, default=0.0002)
-    parser.add_argument('--lr_scale', type=float, default=50)
-    parser.add_argument('--lr_scale_patterns', type=str, nargs='+', default=('head',))
-    parser.add_argument('--optimizer', type=str, default='adamw')
+    p = argparse.ArgumentParser(description='Inf-SSM class-incremental learning on Vim')
+    p.add_argument('-d', '--dataset', required=True, choices=tuple(NUM_CLASSES))
+    p.add_argument('-dr', '--data_root', default='', help='CIFAR-100: download dir; ImageNet-R / Caltech-256: the extracted image folder')
+    p.add_argument('-t', '--num_tasks', type=int, default=10)
+    p.add_argument('--random_class', action='store_true', help='shuffle the class order with --seed (official default: natural order)')
+    p.add_argument('--seed', type=int, default=0, help='paper: 0, 10, 100')
+    p.add_argument('-m', '--model', default='vim_small', choices=tuple(MODELS))
+    p.add_argument('--depth', type=int, default=None, help='override the number of Vim blocks (smoke tests only)')
+    p.add_argument('--finetune', default='hf', help="task-0 checkpoint path; 'hf' = the authors' one for this benchmark and seed; "
+                                                   "'vim_small_in1k' = ImageNet Vim-small weights (use with --full_run); 'none' = random init")
+    p.add_argument('--full_run', action='store_true', help='also train task 0 (with --cl_method seq semantics, no old model)')
+    p.add_argument('--cl_method', default='reg', choices=('reg', 'seq'), help='reg = Inf-SSM, seq = plain sequential fine-tuning')
+    p.add_argument('--reg_mode', default='inf_ssm', choices=('inf_ssm', 'mse'))
+    p.add_argument('--reg_lambda', type=float, default=None, help='default: the paper value for this benchmark')
+    # optimisation (None = the paper value for this benchmark)
+    p.add_argument('-e', '--epochs', type=int, default=40)
+    p.add_argument('-b', '--batch_size', type=int, default=128)
+    p.add_argument('--lr', type=float, default=None)
+    p.add_argument('--warmup_lr', type=float, default=None)
+    p.add_argument('--min_lr', type=float, default=None)
+    p.add_argument('--task_lr_scaling', type=float, default=None)
+    p.add_argument('--weight_decay', type=float, default=0.1)
+    p.add_argument('--opt', default='adamw')
+    p.add_argument('--opt_eps', type=float, default=1e-8)
+    p.add_argument('--clip_grad', type=float, default=None)
+    p.add_argument('--warmup_epochs', type=int, default=5)
+    p.add_argument('--cooldown_epochs', type=int, default=10)
+    p.add_argument('--decay_rate', type=float, default=0.1)
+    p.add_argument('--drop_path', type=float, default=0.0)
+    # augmentation (DeiT/Vim defaults)
+    p.add_argument('--input_size', type=int, default=224)
+    p.add_argument('--eval_crop_ratio', type=float, default=0.875)
+    p.add_argument('--color_jitter', type=float, default=0.3)
+    p.add_argument('--aa', default='rand-m9-mstd0.5-inc1')
+    p.add_argument('--smoothing', type=float, default=0.1)
+    p.add_argument('--train_interpolation', default='bicubic')
+    p.add_argument('--reprob', type=float, default=0.25)
+    p.add_argument('--remode', default='pixel')
+    p.add_argument('--recount', type=int, default=1)
+    p.add_argument('--mixup', type=float, default=0.8)
+    p.add_argument('--cutmix', type=float, default=1.0)
+    p.add_argument('--mixup_prob', type=float, default=1.0)
+    p.add_argument('--mixup_switch_prob', type=float, default=0.5)
+    p.add_argument('--mixup_mode', default='batch')
+    # hardware
+    p.add_argument('-jt', '--workers', type=int, default=8)
+    p.add_argument('--use_amp', type=str2bool, default=False, help='fp16 autocast; the paper runs in fp32')
+    p.add_argument('--data_parallel', type=str2bool, default=False, help='split each batch across all visible GPUs (nn.DataParallel)')
+    p.add_argument('--grad_ckpt', type=str2bool, default=False, help='recompute each Vim block in backward: much less memory, ~30%% slower')
+    # logging and checkpoints
+    p.add_argument('--use_wandb', action='store_true')
+    p.add_argument('--wandb_project', default='inf-ssm-baseline')
+    p.add_argument('--progress_interval', type=float, default=0, help='seconds between tqdm progress updates; 0 disables the bars')
+    p.add_argument('--ckpt_dir', default='', help='resumable checkpoints and results.json under <ckpt_dir>/<run_name>; empty disables')
+    p.add_argument('--hf_repo', default='', help='Hugging Face repo id to mirror the checkpoints to (token from HF_TOKEN); needs --ckpt_dir')
+    p.add_argument('--hf_sync_every', type=int, default=5, help='upload the mid-task checkpoint every N epochs (0 = only at task ends)')
+    p.add_argument('--hf_squash', type=str2bool, default=False, help='squash the HF repo history after each task so storage keeps one copy per file')
+    args = p.parse_args()
 
-    parser.add_argument('--weight_decay', type=float, default=5e-5)
-    parser.add_argument('--lr_sch', type=str, default='multistep', choices=('cosine', 'step', 'multistep'))
-    parser.add_argument('--warmup_epochs', type=int, default=0)
-    parser.add_argument('--min_lr', type=float, default=1e-5)
-    parser.add_argument('-dm', '--decay_milestones', type=int, nargs='+', default=[5, 8])
-    parser.add_argument('--decay_epochs', type=int, default=1000)
-    parser.add_argument('--decay_rate', type=float, default=0.1)
-    parser.add_argument('--use_wandb', action='store_true', help='Use wandb for logging')
-    parser.add_argument('--wandb_project', type=str, default='inf-ssm-baseline', help='WandB project name')
-    parser.add_argument('--wandb_name', type=str, default='', help='WandB run name')
-    args = parser.parse_args()
-
-    if args.interp_mode == 'auto':
-        match args.dataset:
-            case 'imagenet_r' | 'sdomainet':
-                args.interp_mode = 'bilinear'
-            case 'cifar100':
-                args.interp_mode = 'bicubic'
-
+    preset = PRESETS.get((args.dataset, args.num_tasks), {})
+    for k in ('lr', 'warmup_lr', 'min_lr', 'task_lr_scaling', 'reg_lambda'):
+        if getattr(args, k) is None:
+            assert k in preset, f"no paper preset for {args.dataset} with {args.num_tasks} tasks: pass --{k}"
+            setattr(args, k, preset[k])
+    args.hf_dir = preset.get('hf_dir')
+    if args.aa is not None and args.aa.lower() == 'none':
+        args.aa = None
+    args.nb_classes = NUM_CLASSES[args.dataset]
+    args.n_classes_per_task = args.nb_classes // args.num_tasks
+    if args.mixup > 0 or args.cutmix > 0:
+        assert args.batch_size % 2 == 0, "mixup/cutmix needs an even batch size"
     return args
 
 
-def seed_etc_options(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
-    np.set_printoptions(precision=4, linewidth=256)
-    torch.set_printoptions(linewidth=256)
-    try:
-        torchvision.set_image_backend('accimage')
-    except Exception:
-        torchvision.set_image_backend('PIL')  # accimage not available; PIL is functionally identical
+def run_name(args) -> str:
+    lam = f"_lam{args.reg_lambda:g}" if args.cl_method == 'reg' else ""
+    return f"inf_ssm_{args.cl_method}{lam}_{args.model}_{args.dataset}_t{args.num_tasks}_e{args.epochs}_seed_{args.seed}"
 
 
-def set_model_mode(GVM: GlobalVarsManager, model: DefocusAttentionNetwork, training: bool, to_gpu: bool = True, training_string: tuple[str] = ('',)) -> DefocusAttentionNetwork:
-    for n, p in model.named_parameters():
-        if training and any([_s in n for _s in training_string]):
-            p.requires_grad_(True)
-        else:
-            p.requires_grad_(False)
-    params_requires_grad = [n for n, p in model.named_parameters() if p.requires_grad]
+def task_lr(args, t: int) -> float:
+    # main.py does `args.lr *= task_lr_scaling` at the start of every task (task 0 included)
+    return args.lr * args.task_lr_scaling ** (t + 1) if args.task_lr_scaling < 1.0 else args.lr
 
-    model.eval()
-    for n, m in model.named_modules():
-        if training and any([n.endswith(_s) and not isinstance(m, nn.Identity) for _s in training_string]):
-            m.train()
-        else:
-            m.eval()
-    modules_training = [n for n, m in model.named_modules() if m.training]
 
-    if to_gpu:
-        model.cuda()
+def resolve_checkpoint(args) -> str:
+    from huggingface_hub import hf_hub_download
+    if args.finetune == 'hf':
+        assert args.hf_dir, f"no released task-0 checkpoint for {args.dataset} with {args.num_tasks} tasks"
+        fn = f"{args.hf_dir}/task_0_checkpoint_seed_{args.seed}.pth"
+        try:
+            return hf_hub_download(TASK0_HF_REPO, fn)
+        except Exception as e:
+            raise SystemExit(f"could not download {TASK0_HF_REPO}/{fn} ({type(e).__name__}). The authors only released seed 0; "
+                             f"for other seeds use --full_run --finetune vim_small_in1k") from e
+    if args.finetune == 'vim_small_in1k':
+        return hf_hub_download(*VIM_SMALL_IN1K)
+    return None if args.finetune == 'none' else args.finetune
 
-    if training:
-        pass
+
+# ---------------------------------------------------------------- state, RNG, checkpoint files
+
+class Run:
+    args: argparse.Namespace
+    run_dir: str | None = None
+    hub = None
+    g: torch.Generator
+    accum: dict  # official accum_result: {'class_i_acc': [...], 'task_i_acc': [...], 'mean_class_acc': [...], ...}
+    start_time: float
+    resume_epoch: dict | None = None
+
+
+def rng_state(R: Run) -> dict:
+    return {'python': random.getstate(), 'numpy': np.random.get_state(), 'torch': torch.get_rng_state(),
+            'cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None, 'loader': R.g.get_state()}
+
+
+def set_rng_state(R: Run, s: dict) -> None:
+    random.setstate(s['python'])
+    np.random.set_state(s['numpy'])
+    torch.set_rng_state(s['torch'])
+    if s['cuda'] is not None and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all(s['cuda'])
+    R.g.set_state(s['loader'])
+
+
+def atomic_save(obj, path: str) -> None:
+    torch.save(obj, path + ".tmp")
+    os.replace(path + ".tmp", path)
+
+
+def push(R: Run, filename: str, message: str) -> None:
+    if R.hub is not None:
+        R.hub.push(filename, message)
+
+
+def acc_matrix(R: Run, n_tasks_done: int) -> list[list[float]]:
+    """M[t][i] = class-incremental test accuracy on task i after training task t (i <= t)."""
+    return [[R.accum[f'class_{i}_acc'][t - i] for i in range(t + 1)] for t in range(n_tasks_done)]
+
+
+def forgetting(M: list[list[float]], t: int) -> float:
+    """Official forgetting(): mean over tasks i < t of (best accuracy so far - accuracy now)."""
+    if t == 0:
+        return 0.0
+    return sum(max(M[s][i] for s in range(i, t + 1)) - M[t][i] for i in range(t)) / t
+
+
+def write_results(R: Run, t: int) -> None:
+    n = t + 1
+    M = acc_matrix(R, n)
+    aa = R.accum['mean_class_acc']
+    results = {
+        'run_name': run_name(R.args),
+        'tasks_done': n,
+        'num_tasks': R.args.num_tasks,
+        'finished': n == R.args.num_tasks,
+        'avg_acc': aa[t],                      # AA (class-incremental), fraction
+        'avg_inc_acc': sum(aa[:n]) / n,        # AIA
+        'forgetting': forgetting(M, t),        # FM
+        'avg_acc_per_task': aa[:n],
+        'forgetting_per_task': [forgetting(M, s) for s in range(n)],
+        'til_avg_acc_per_task': R.accum['mean_task_acc'][:n],
+        'acc_matrix': M,
+        'accum_result': R.accum,               # same layout as the official accum_result.json
+        'elapsed_hours': (ttime() - R.start_time) / 3600,
+        'args': vars(R.args),
+    }
+    if R.run_dir is not None:
+        with open(os.path.join(R.run_dir, RESULTS), 'w') as f:
+            json.dump(results, f, indent=2, default=str)
+    print(f":: ** Results of task [{n}/{R.args.num_tasks}]: [ AA {results['avg_acc']:>6.2%} | AIA {results['avg_inc_acc']:>6.2%} | "
+          f"FM {results['forgetting']:>6.2%} | TIL {results['til_avg_acc_per_task'][-1]:>6.2%} ] **", flush=True)
+    print(f":: ** Time so far: {results['elapsed_hours']:.2f} h **", flush=True)
+    if R.args.use_wandb:
+        import wandb
+        wandb.log({'task': t, 'AA': results['avg_acc'], 'AIA': results['avg_inc_acc'], 'FM': results['forgetting'],
+                   'TIL_AA': results['til_avg_acc_per_task'][-1],
+                   **{f'test/class_{i}_acc': M[t][i] for i in range(n)}})
+
+
+def save_task_checkpoint(R: Run, model: nn.Module, t: int) -> None:
+    if R.run_dir is None:
+        return
+    atomic_save({'tasks_done': t + 1, 'model': model.state_dict(), 'accum': R.accum,
+                 'elapsed': ttime() - R.start_time, 'rng': rng_state(R)}, os.path.join(R.run_dir, CKPT_TASK))
+    for fn in (CKPT_EPOCH, CKPT_BEST):
+        if os.path.exists(_p := os.path.join(R.run_dir, fn)):
+            os.remove(_p)
+    print(f":: checkpoint saved: {R.run_dir} (tasks done: {t + 1})", flush=True)
+    push(R, CKPT_TASK, f"task {t + 1} done")
+    push(R, RESULTS, f"results after task {t + 1}")
+    if R.hub is not None:
+        R.hub.squash_history()
+
+
+def setup_checkpointing(R: Run, model: nn.Module) -> int:
+    """Pull this run's files from the HF mirror if they are not on disk, then restore them. Returns the number of finished tasks."""
+    args = R.args
+    if not args.ckpt_dir:
+        assert not args.hf_repo, "--hf_repo needs --ckpt_dir"
+        return 0
+    R.run_dir = os.path.join(args.ckpt_dir, run_name(args))
+    os.makedirs(R.run_dir, exist_ok=True)
+    if args.hf_repo:
+        from hf_sync import HubMirror
+        R.hub = HubMirror(args.hf_repo, run_name(args), args.ckpt_dir, squash=args.hf_squash)
+        if pulled := R.hub.pull([CKPT_TASK, CKPT_EPOCH, CKPT_BEST, RESULTS, WANDB_ID]):
+            print(f":: pulled {pulled} from hf://{args.hf_repo}/{run_name(args)}")
+
+    tasks_done = 0
+    if os.path.exists(_p := os.path.join(R.run_dir, CKPT_TASK)):
+        ckpt = torch.load(_p, map_location='cpu', weights_only=False)
+        tasks_done = ckpt['tasks_done']
+        model.load_state_dict(ckpt['model'])
+        R.accum = ckpt['accum']
+        R.start_time = ttime() - ckpt['elapsed']
+        set_rng_state(R, ckpt['rng'])
+        print(f":: resumed from {_p}: {tasks_done}/{args.num_tasks} tasks done", flush=True)
+
+    if os.path.exists(_p := os.path.join(R.run_dir, CKPT_EPOCH)):
+        ep = torch.load(_p, map_location='cpu', weights_only=False)
+        if ep['task'] == tasks_done:  # an older one belongs to a task that already finished
+            assert os.path.exists(os.path.join(R.run_dir, CKPT_BEST)), f"{CKPT_EPOCH} without {CKPT_BEST}"
+            R.resume_epoch = ep
+    return tasks_done
+
+
+def init_wandb(R: Run) -> None:
+    import wandb
+    _id_path = os.path.join(R.run_dir, WANDB_ID) if R.run_dir else None
+    if _id_path and os.path.exists(_id_path):
+        with open(_id_path) as f:
+            run_id = f.read().strip()
     else:
-        assert len(params_requires_grad) == 0, f"{params_requires_grad}"
-        assert len(modules_training) == 0, f"{modules_training}"
-
-    return model
-
-
-def set_learning_rates(GVM: GlobalVarsManager, model: DefocusAttentionNetwork, base_lr: float, lr_scale: float, lr_scale_patterns: str) -> list[dict[str: Tensor | float]]:
-    param_lr_groups = [{'params': [], 'lr': base_lr},
-                       {'params': [], 'lr': base_lr * lr_scale}]
-    lr_param_dict = {_p['lr']: [] for _p in param_lr_groups}
-
-    for n, p in model.named_parameters():
-        if p.requires_grad:
-            _group_idx = 1 if any(_s in n for _s in lr_scale_patterns) else 0
-            param_lr_groups[_group_idx]['params'].append(p)
-            lr_param_dict[param_lr_groups[_group_idx]['lr']].append(n)
-
-    return param_lr_groups
+        run_id = uuid.uuid4().hex[:12]
+    wandb.init(project=R.args.wandb_project, name=run_name(R.args), config=vars(R.args), id=run_id, resume='allow')
+    if _id_path and not os.path.exists(_id_path):
+        with open(_id_path, 'w') as f:
+            f.write(run_id)
+        push(R, WANDB_ID, "wandb run id")
 
 
-def train_one_epoch(GVM: GlobalVarsManager, curr_epoch: int, dataloader: DataLoader, model: DefocusAttentionNetwork, criterion: nn.CrossEntropyLoss, optimizer: torch.optim.Optimizer, old_model: DefocusAttentionNetwork = None) -> str:
-    args = GVM.args
-    temperature: float = args.temperature
-    use_amp: bool = args.use_amp
-    assert temperature > 0.
+# ---------------------------------------------------------------- train / eval
 
-    amp_scalar = GradScaler(enabled=use_amp)
-    # [Bug 6 fix] Add ism_loss to ScalarMeter for separate logging
-    if old_model is not None and args.use_inf_ssm:
-        scalar_meter = misc.ScalarMeter(loss="samp_avg:.4f", ism_loss="samp_avg:.6f", batch_time="step_sum:.3f", acc_top1="samp_avg:>6.2%")
-    else:
-        scalar_meter = misc.ScalarMeter(loss="samp_avg:.4f", batch_time="step_sum:.3f", acc_top1="samp_avg:>6.2%")
-    _btimer = ttime()
+def maybe_parallel(R: Run, module: nn.Module) -> nn.Module:
+    # DataParallel only wraps the forward pass: parameters, optimizer and checkpoints stay on the plain model
+    if R.args.data_parallel and torch.cuda.device_count() > 1:
+        return nn.DataParallel(module)
+    return module
 
-    if old_model is not None and args.use_inf_ssm:
-        from utils.inf_ssm_loss import InfSSMLoss
-        inf_ssm_loss_fn = InfSSMLoss().cuda()
 
-    is_interactive = sys.stdout.isatty()
-    pbar = tqdm.tqdm(enumerate(dataloader, 1), total=len(dataloader), dynamic_ncols=True, disable=not is_interactive, desc=f"Ep {curr_epoch}")
-    for i_batch, (images, target) in pbar:
-        images: Tensor = images.cuda(non_blocking=True)
-        target: Tensor = target.cuda(non_blocking=True)
+def train_one_epoch(R: Run, t: int, epoch: int, model: nn.Module, old_net: nn.Module | None, loader: DataLoader,
+                    optimizer, criterion, mixup_fn, scaler) -> dict:
+    args = R.args
+    model.train()
+    fwd = maybe_parallel(R, InfSSMForward(model, old_net, args.reg_lambda, args.reg_mode))
+    pc, ac = t * args.n_classes_per_task, (t + 1) * args.n_classes_per_task
+    sums = dict(loss=0., reg_loss=0., correct=0, count=0, steps=0)
 
-        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
-            logits: Tensor = model(images)
-
-        # [Bug 5 fix] Compute ISM loss OUTSIDE autocast in float32 for numerical stability
-        ism_loss = torch.tensor(0.0).cuda()
-        if old_model is not None and args.use_inf_ssm:
-            with torch.no_grad():
-                _ = old_model(images)
-            
-            old_states = []
-            for name, module in old_model.named_modules():
-                if hasattr(module, 'extracted_A'):
-                    old_states.append((module.extracted_A.float(), module.extracted_C.float()))
-            
-            new_states = []
-            for name, module in model.named_modules():
-                if hasattr(module, 'extracted_A'):
-                    new_states.append((module.extracted_A.float(), module.extracted_C.float()))
-            
-            for (A_old, C_old), (A_new, C_new) in zip(old_states, new_states):
-                ism_loss = ism_loss + inf_ssm_loss_fn(A_old, C_old, A_new, C_new)
-            if len(old_states) > 0:
-                ism_loss = ism_loss / len(old_states)
-
-        if i_batch == 1:
-            if args.seperate_head:
-                assert logits.shape[1] == len(GVM.cl_mngr.current_task_classes)
-            else:
-                assert logits.shape[1] == len(GVM.cl_mngr.sofar_task_classes)
-
-        loss: Tensor = criterion(logits / temperature, target)
-        if old_model is not None and args.use_inf_ssm:
-            loss = loss + args.inf_ssm_lambda * ism_loss
-
+    for samples, targets in tqdm.tqdm(loader, total=len(loader), desc=f"Task [{t + 1}] epoch [{epoch + 1}] train", dynamic_ncols=True,
+                                      disable=args.progress_interval <= 0, mininterval=args.progress_interval):
+        samples = samples.to(DEVICE, non_blocking=True)
+        targets = targets.to(DEVICE, non_blocking=True)
         optimizer.zero_grad()
-        amp_scalar.scale(loss).backward()
-        amp_scalar.step(optimizer)
-        amp_scalar.update()
-
-        acc_top1, = misc.calc_accuracy(logits, target, topk=(1,))
-        batch_time = ttime() - _btimer
-
-        # [Bug 6 fix] Log ISM loss separately when active
-        if old_model is not None and args.use_inf_ssm:
-            scalar_meter.add_step_value(len(images), loss=loss.item(), ism_loss=ism_loss.item(), batch_time=batch_time, acc_top1=acc_top1)
+        if mixup_fn is not None:
+            samples, targets = mixup_fn(samples, targets)
         else:
-            scalar_meter.add_step_value(len(images), loss=loss.item(), batch_time=batch_time, acc_top1=acc_top1)
+            targets = nn.functional.one_hot(targets, args.nb_classes).float() * (1 - args.smoothing) + args.smoothing / args.nb_classes
 
-        # Step logging
-        if is_interactive:
-            pbar.set_postfix(loss=f"{loss.item():.4f}", ism=f"{ism_loss.item():.4f}" if old_model is not None and args.use_inf_ssm else "0", top1=f"{acc_top1:.1%}")
-        else:
-            # Periodic batch logging for live tail -f monitoring in nohup
-            print_freq = max(1, len(dataloader) // 5)
-            if i_batch % print_freq == 0 or i_batch == len(dataloader):
-                if old_model is not None and args.use_inf_ssm:
-                    print(f"  [Epoch {curr_epoch} | Batch {i_batch:>2}/{len(dataloader)}] loss: {loss.item():.4f} (ism: {ism_loss.item():.6f}) | top1: {acc_top1:>6.2%} | step: {batch_time:.2f}s", flush=True)
-                else:
-                    print(f"  [Epoch {curr_epoch} | Batch {i_batch:>2}/{len(dataloader)}] loss: {loss.item():.4f} | top1: {acc_top1:>6.2%} | step: {batch_time:.2f}s", flush=True)
+        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=args.use_amp):
+            outputs, penalty = fwd(samples)
+            penalty = penalty.mean()
+            outputs = outputs[:, pc:ac]
+            targets = targets[:, pc:ac] / targets[:, pc:ac].sum(dim=1, keepdim=True)  # back to sum = 1
+            loss = criterion(outputs, targets) + penalty
 
-            if getattr(args, 'use_wandb', False):
-                try:
-                    import wandb
-                    wandb.log({
-                        "train/batch_loss": loss.item(),
-                        "train/batch_acc": acc_top1,
-                        "train/ism_loss": ism_loss.item() if old_model is not None and args.use_inf_ssm else 0.0,
-                        "train/lr": optimizer.param_groups[0]['lr']
-                    })
-                except Exception:
-                    pass
+        loss_value = loss.item()
+        if not math.isfinite(loss_value):
+            print(f"Loss is {loss_value}, stopping training", flush=True)
+            sys.exit(1)
+        scaler.scale(loss).backward()
+        if args.clip_grad is not None:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+        scaler.step(optimizer)
+        scaler.update()
 
-        _btimer = ttime()
+        with torch.no_grad():
+            sums['correct'] += (outputs.argmax(dim=1) == targets.argmax(dim=1)).sum().item()
+        sums['count'] += samples.shape[0]
+        sums['loss'] += loss_value
+        sums['reg_loss'] += penalty.item()
+        sums['steps'] += 1
 
-
-    _epoch_scalar_str = scalar_meter.format_outout(scalar_meter.update_epoch_average_value())
-    return _epoch_scalar_str
-
-
-def cache_state(GVM: GlobalVarsManager, taskid: int, epoch: int, model: DefocusAttentionNetwork, optimizer: torch.optim.Optimizer, scheduler: torch.optim.lr_scheduler.LRScheduler):
-
-    task_params = OrderedDict()
-
-    for n, p in model.named_parameters():
-        if p.requires_grad:
-            task_params[n] = p.clone().cpu()
-
-    assert not f'task_params_{taskid}' in GVM.param_dict
-    GVM.param_dict[f'task_params_{taskid}'] = dict(filter(lambda n_p: 'head' in n_p[0], task_params.items()))
+    n = max(sums['steps'], 1)
+    return {'loss': sums['loss'] / n, 'reg_loss': sums['reg_loss'] / n, 'acc': sums['correct'] / max(sums['count'], 1),
+            'lr': optimizer.param_groups[0]['lr']}
 
 
-def train_one_task(GVM: GlobalVarsManager, taskid: int, task_classes: list[int], model: DefocusAttentionNetwork, **kwargs) -> DefocusAttentionNetwork:
-    args = GVM.args
-    if args.epochs == 0:
-        return model
+@torch.no_grad()
+def cl_evaluate(R: Run, model: nn.Module, loader: DataLoader, task_id: int, current: bool = False) -> dict:
+    """Official cl_evaluate: class-incremental accuracy over the logits of tasks 0..task_id (and task-incremental
+    accuracy within each task's logits), per task. current=True evaluates only task_id (used on the val split)."""
+    model.eval()
+    fwd = maybe_parallel(R, model)
+    cpt = R.args.n_classes_per_task
+    result = {}
+    for task in range(task_id if current else 0, task_id + 1):
+        loader.dataset.set_task(task)
+        cil, til = 0, 0
+        for images, target in loader:
+            images, target = images.to(DEVICE, non_blocking=True), target.to(DEVICE, non_blocking=True)
+            with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=R.args.use_amp):
+                output = fwd(images)[:, :(task_id + 1) * cpt]
+            cil += (output.argmax(dim=1) == target).sum().item()
+            til += (output[:, task * cpt:(task + 1) * cpt].argmax(dim=1) + task * cpt == target).sum().item()
+        result[f'class_{task}_acc'] = cil / len(loader.dataset)
+        result[f'task_{task}_acc'] = til / len(loader.dataset)
+    if not current:
+        result['mean_class_acc'] = sum(result[f'class_{i}_acc'] for i in range(task_id + 1)) / (task_id + 1)
+        result['mean_task_acc'] = sum(result[f'task_{i}_acc'] for i in range(task_id + 1)) / (task_id + 1)
+    return result
 
-    _ttimer = ttime()
-    _ntstr = str(GVM.cl_mngr.num_tasks)
 
-    # [Bug 4 fix] Freeze old model BEFORE head modification so it retains
-    # the previous task's head and feature representations intact.
-    # [Bug 7 fix] Safety check that split_parameters() has been called.
-    old_model = None
-    if taskid > 0 and args.use_inf_ssm:
-        import copy
-        assert hasattr(model.blocks[0].mixer, 'x_proj_step'), \
-            "split_parameters() not called — model.reload_params() must run before training"
-        old_model = copy.deepcopy(model)
-        old_model = old_model.cuda()
-        old_model.eval()
-        for p in old_model.parameters():
+def train_one_task(R: Run, t: int, model: nn.Module, loader_train: DataLoader, loader_val: DataLoader, criterion, mixup_fn) -> None:
+    args = R.args
+    old_net = None
+    if t > 0 and args.cl_method == 'reg':
+        old_net = deepcopy(model).eval()  # the model after task t-1
+        for p in old_net.parameters():
             p.requires_grad = False
 
-    model: DefocusAttentionNetwork = set_model_mode(GVM, model, training=True, training_string=GVM.cache_dict['training_string'])
-    model = modify_head(GVM, model, training=True, task_classes=task_classes)
+    lr = task_lr(args, t)
+    optimizer = create_optimizer_v2(model, opt=args.opt, lr=lr, weight_decay=args.weight_decay, eps=args.opt_eps)
+    scheduler, _ = create_scheduler_v2(optimizer, sched='cosine', num_epochs=args.epochs, min_lr=args.min_lr, warmup_lr=args.warmup_lr,
+                                       warmup_epochs=args.warmup_epochs, cooldown_epochs=args.cooldown_epochs, decay_rate=args.decay_rate)
+    scaler = torch.cuda.amp.GradScaler(enabled=args.use_amp and DEVICE.type == 'cuda')
+    loader_train.dataset.set_task(t)
 
-    dataset = define_dataset(GVM, task_classes, training=True, transform_type=args.transform_type, target_map_to_local=args.seperate_head, expand_times=args.expand_times)
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers, pin_memory=True, timeout=args.timeout if args.workers > 0 else 0,
-                            drop_last=False, persistent_workers=args.persistent_workers)
+    best_acc, best_epoch, start_epoch = -1.0, -1, 0  # official starts at 0; -1 just guarantees a saved best model
+    best_path = os.path.join(R.run_dir, CKPT_BEST) if R.run_dir else None
+    best_state = None  # used when checkpointing is off
+    if (ep := R.resume_epoch) is not None and ep['task'] == t:
+        model.load_state_dict(ep['model'])
+        optimizer.load_state_dict(ep['optimizer'])
+        if ep.get('scaler') is not None:
+            scaler.load_state_dict(ep['scaler'])
+        scheduler.step(ep['epoch'])
+        set_rng_state(R, ep['rng'])
+        best_acc, best_epoch, start_epoch = ep['best_acc'], ep['best_epoch'], ep['epoch'] + 1
+        print(f"Task [{t + 1}/{args.num_tasks}]:: resumed after epoch {start_epoch} (best val {best_acc:.2%} at epoch {best_epoch + 1})", flush=True)
+    R.resume_epoch = None
+    print(f"Task [{t + 1}/{args.num_tasks}]:: {len(loader_train.dataset)} train images, base lr {lr:.3g}, "
+          f"{'Inf-SSM ' + args.reg_mode + f' lambda={args.reg_lambda:g}' if old_net is not None else 'no regularizer'}", flush=True)
 
-    criterion = nn.CrossEntropyLoss().cuda()
-
-    if args.lr_scale == 1:
-        param_groups = filter(lambda p: p.requires_grad, model.parameters())
-    else:
-        param_groups = set_learning_rates(GVM, model, args.lr, args.lr_scale, args.lr_scale_patterns)
-
-    GVM.cache_dict['update_proj_dict'] = {}
-
-    if args.optimizer == 'mod_adam':
-        optimizer = ModAdam(param_groups, update_projection_dict=GVM.cache_dict['update_proj_dict'], arg_dict={}, lr=args.lr, weight_decay=args.weight_decay, foreach=True)
-    else:
-        optimizer = create_optimizer_v2(param_groups, opt=args.optimizer, lr=args.lr, weight_decay=args.weight_decay, foreach=True)
-
-    scheduler, num_epochs = create_scheduler_v2(optimizer, sched=args.lr_sch, num_epochs=args.epochs, decay_epochs=args.decay_epochs, decay_milestones=args.decay_milestones,
-                                                 decay_rate=args.decay_rate, min_lr=args.min_lr, warmup_epochs=args.warmup_epochs, warmup_lr=args.min_lr)
-    assert num_epochs == args.epochs
-
-
-    torch.cuda.empty_cache()
-    for epoch in range(0, args.epochs + 1):
-        if epoch > 0:
-            _epoch_scalar_str = train_one_epoch(GVM, epoch, dataloader, model, criterion, optimizer, old_model=old_model)
-            print(f"Task [{taskid + 1:>{len(_ntstr)}}/{_ntstr}] Epoch [{epoch:>{len(_nestr := str(args.epochs))}}/{_nestr}]:: {_epoch_scalar_str}", flush=True)
-        scheduler.step(epoch)
-
-    # Clean up old model to free GPU memory
-    if old_model is not None:
-        del old_model
-        torch.cuda.empty_cache()
-
-    cache_state(GVM, taskid, epoch, model, optimizer, scheduler)
-
-
-    if args.refine_head:
-        extract_class_features(GVM, model)
-        if args.refine_head:
-            refine_head(GVM, model)
-
-    print(f"Task [{taskid + 1:>{len(_ntstr)}}/{_ntstr}]:: Training time = {misc.format_duration(ttime() - _ttimer)}")
-
-    return model
-
-
-def evaluate_one_task(GVM: GlobalVarsManager, train_taskid: int, eval_taskid: int, eval_task_classes: list[int], model: DefocusAttentionNetwork) -> OrderedDict[str, float]:
-    use_amp: bool = GVM.args.use_amp
     _ttimer = ttime()
-
-    dataset = define_dataset(GVM, eval_task_classes, training=False, transform_type=GVM.args.transform_type, target_map_to_local=False)
-    dataloader = DataLoader(dataset, batch_size=GVM.args.eval_batch_size, shuffle=False, num_workers=GVM.args.eval_workers, pin_memory=True, timeout=GVM.args.timeout if GVM.args.eval_workers > 0 else 0)
-
-    set_model_mode(GVM, model, training=False)
-    scalar_meter = misc.ScalarMeter(acc_class_inc="samp_avg:>6.2%")
-
-    is_interactive = sys.stdout.isatty()
-    for images, target in tqdm.tqdm(dataloader, total=len(dataloader), dynamic_ncols=True, disable=not is_interactive, desc=f"Eval [{eval_taskid + 1}]"):
-        images: Tensor = images.cuda(non_blocking=True)
-        target: Tensor = target.cuda(non_blocking=True)
-
-        with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
-            with torch.no_grad():
-                logits: Tensor = model(images)
-
-        assert logits.ndim == 2
-        assert logits.shape[1] == len(GVM.cl_mngr.sofar_task_classes), f"{logits.shape}, {len(GVM.cl_mngr.sofar_task_classes)}"
-
-        class_inc_preds = logits.argmax(dim=1)
-
-        acc_class_inc, acc_topnn_class, num_nn_class = misc.calc_acc_topnn_dynamically(class_inc_preds, target)
-        scalar_meter.add_step_value(target.shape[0], acc_class_inc=acc_class_inc)
-
-    assert len(dataset) == len(scalar_meter)
-    result_dict = scalar_meter.update_epoch_average_value()
-
-    print(f"Task [{train_taskid + 1}/{GVM.cl_mngr.num_tasks}]:: Eval [{eval_taskid + 1:>{len(_tt := str(train_taskid + 1))}}/{_tt}]: eval_time={ttime() - _ttimer:.1f}s, {scalar_meter.format_outout(result_dict)}")
-
-    result_dict['num_samples'] = len(dataset)
-
-    return result_dict
-
-
-def evaluate_tasks_sofar(GVM: GlobalVarsManager, train_taskid: int, model: DefocusAttentionNetwork):
-    model = modify_head(GVM, model, training=False)
-    average_acc_meter = misc.ScalarMeter(acc_class_inc="samp_avg:>6.2%")
-
-    for eval_taskid in range(GVM.cl_mngr.current_taskid + 1):
-        eval_task_classes = GVM.cl_mngr.get_classes(eval_taskid)
-        one_result_dict = evaluate_one_task(GVM, train_taskid, eval_taskid, eval_task_classes, model)
-        GVM.acc_mat_dict[f'AccClassIncMat'][train_taskid, eval_taskid] = one_result_dict['acc_class_inc']
-        average_acc_meter.add_step_value(**one_result_dict)
-
-    avg_result_dict = average_acc_meter.update_epoch_average_value()
-    GVM.acc_mat_dict[f'AccClassIncList'][train_taskid] = avg_result_dict['acc_class_inc']
-
-
-def task_ending_info(GVM: GlobalVarsManager):
-    current_taskid = GVM.cl_mngr.current_taskid
-
-    acc_info_dict = {
-        'class_inc_last_acc': float(GVM.acc_mat_dict['AccClassIncList'][current_taskid]),
-        'class_inc_last_forg': misc.calc_forgetting(GVM.acc_mat_dict['AccClassIncMat'], current_taskid),
-    }
-    _formatter = misc.ScalarFormatter(sep=' | ', class_inc_last_acc=">6.2%", class_inc_last_forg=">6.2%")
-
-    print(f":: ** Results of task [{current_taskid + 1}]: [ {_formatter(**acc_info_dict)} ] **")
-    print(f":: ** Time so far: {misc.format_duration(ttime() - GVM.cache_dict['exp_start_time'])} **")
-
-    if getattr(GVM.args, 'use_wandb', False):
-        try:
-            import wandb
-            wandb.log({
-                "task": current_taskid,
-                "class_inc_last_acc": acc_info_dict['class_inc_last_acc'],
-                "class_inc_last_forg": acc_info_dict['class_inc_last_forg']
-            })
-        except ImportError:
-            pass
-
-
-
-def get_param_id_dict(model: DefocusAttentionNetwork, patterns: list[str]) -> dict[int, dict[Literal['name', 'shape'], str | list[int]]]:
-    param_id_dict = {}
-    for n, p in model.named_parameters():
-        if p.requires_grad and any([_s in n for _s in patterns]):
-            param_id_dict[id(p)] = {'name': n, 'shape': list(p.shape)}
-    assert len(param_id_dict) > 0, f"{param_id_dict}"
-    return param_id_dict
-
-
-def get_head_dim_arg_dict(GVM: GlobalVarsManager, args: argparse.Namespace) -> dict[Literal['num_classes'], int]:
-    head_dim_arg_dict = {}
-    head_dim_type = args.head_dim_type
-
-    match args.logit_type:
-        case 'sim_imgtext':
-            assert head_dim_type in ('pretrained', 'text_dim')
-        case 'head_out':
-            assert head_dim_type in ('task_classes')
-
-    match head_dim_type:
-        case 'task_classes':
-            head_dim_arg_dict['num_classes'] = len(current_task_classes) if args.seperate_head else len(GVM.cl_mngr.sofar_task_classes)
-        case 'pretrained':
-            pass
-        case 'text_dim':
-            head_dim_arg_dict['num_classes'] = 512
-        case _:
-            raise ValueError(head_dim_type)
-    return head_dim_arg_dict
-
-
-def modify_head(GVM: GlobalVarsManager, model: DefocusAttentionNetwork, training: bool, **kwargs):
-    args: argparse.Namespace = GVM.args
-
-    if training:
-        _target_classes = kwargs['task_classes'] if args.seperate_head else GVM.cl_mngr.sofar_task_classes
-    else:
-        _target_classes = GVM.cl_mngr.sofar_task_classes
-
-    if args.logit_type == 'head_out':
-        if model.head.out_features != len(_target_classes):
-            _mh = deepcopy(model.head)
-            _mdevice = _mh.weight.device
-            _mdtype = _mh.weight.dtype
-            model.head = _mh.__class__(_mh.in_features, len(_target_classes), _mh.bias is not None, _mdevice, _mdtype)
-            model.head.requires_grad_(_mh.weight.requires_grad)
-
-            if training:
-                assert model.head.weight.requires_grad
-            else:
-                assert _mh.out_features == len(GVM.cl_mngr.current_task_classes), f"{_mh.out_features}, {len(GVM.cl_mngr.current_task_classes)}"
-                _hw = torch.cat([GVM.param_dict[f'task_params_{_t}']['head.weight'].data.to(_mdevice, _mdtype) for _t in range(GVM.cl_mngr.current_taskid + 1)])
-                assert model.head.weight.data.shape == _hw.shape
-                model.head.weight.data = _hw
-
-                if _mh.bias is not None:
-                    _hb = torch.cat([GVM.param_dict[f'task_params_{_t}']['head.bias'].data.to(_mdevice, _mdtype) for _t in range(GVM.cl_mngr.current_taskid + 1)])
-                    assert model.head.bias.data.shape == _hb.shape
-                    model.head.bias.data = _hb
-        else:
-            pass
-    else:
-        raise ValueError(args.logit_type)
-
-    return model
-
-
-def get_interm_tensor_dict(GVM: GlobalVarsManager, model: DefocusAttentionNetwork, null_param_id_dict: dict) -> dict[int, Tensor]:
-    interm_tensor_dict: dict[int, dict[str, Tensor]] = {}
-
-    def _forward_hook(module: nn.Module, args: tuple[Tensor], output: Tensor):
-        if isinstance(module, utils.mamba_block.IntermReader):
-            _pid = module.dst_param_id
-            if _pid in null_param_id_dict:
-                _mname = module.module_name
-                _interm_tensor: Tensor = args[0]  # [b*l, d]
-
-                if _mname == 'interm_reader_step':
-                    _interm_tensor = rearrange(_interm_tensor, 'b l d -> (b l) d')
-                    _interm_tensor = torch.matmul(_interm_tensor.T, _interm_tensor) / _interm_tensor.shape[0]
-                elif _mname == 'interm_reader_B':
-                    _interm_tensor = rearrange(_interm_tensor, 'b l d -> (b l) d')
-                    _interm_tensor = torch.matmul(_interm_tensor.T, _interm_tensor) / _interm_tensor.shape[0]
-                elif _mname == 'interm_reader_C':
-                    _interm_tensor = rearrange(_interm_tensor, 'b l d -> (b l) d')
-                    _interm_tensor = torch.matmul(_interm_tensor.T, _interm_tensor) / _interm_tensor.shape[0]
-                elif _mname == 'interm_reader_A':
-                    _interm_tensor = rearrange(_interm_tensor, 'b l d -> (b d) l')
-                    _interm_tensor = torch.matmul(_interm_tensor.T, _interm_tensor) / _interm_tensor.shape[0]
-                elif _mname == 'interm_reader_out':
-                    _interm_tensor = rearrange(_interm_tensor, 'b l d -> (b l) d')
-                    _interm_tensor = torch.matmul(_interm_tensor.T, _interm_tensor) / _interm_tensor.shape[0]
-                else:
-                    raise ValueError()
-
-                assert _mname.startswith('interm_reader_')
-
-                if _pid not in interm_tensor_dict:
-                    interm_tensor_dict[_pid] = {}
-                if _mname not in interm_tensor_dict[_pid]:
-                    interm_tensor_dict[_pid][_mname] = torch.zeros_like(_interm_tensor)
-                interm_tensor_dict[_pid][_mname] += _interm_tensor
-        else:
-            raise NotImplementedError()
-
-    _handle_list: list[torch.utils.hooks.RemovableHandle] = []
-    for n, m in model.named_modules():
-        if 'interm_reader' in n and isinstance(m, utils.mamba_block.IntermReader):
-            _handle_list.append(m.register_forward_hook(_forward_hook))
-
-    model = set_model_mode(GVM, model, training=False)
-
-    args = GVM.args
-    train_dataset = define_dataset(GVM, GVM.cl_mngr.current_task_classes, training=True, transform_type=args.transform_type, target_map_to_local=args.seperate_head, use_eval_transform=True, expand_times=1)
-
-    dataloader = DataLoader(train_dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=args.eval_workers, pin_memory=True, timeout=args.timeout if args.eval_workers > 0 else 0)
-
-    for nb, (img, _) in enumerate(dataloader, 1):
-        with torch.no_grad():
-            img: Tensor
-            model(img.cuda(non_blocking=True))
-
-    for _h in _handle_list:
-        _h.remove()
-
-    assert len(interm_tensor_dict) > 0
-    assert sorted(list(interm_tensor_dict.keys())) == sorted(list(null_param_id_dict.keys())), f"({len(interm_tensor_dict.keys())}){interm_tensor_dict.keys()}; ({len(null_param_id_dict)}){null_param_id_dict}"
-
-    if (_k := 'interm_sample_list') not in GVM.cache_dict:
-        GVM.cache_dict[_k] = []
-    GVM.cache_dict[_k].append(len(dataloader.dataset))
-
-    return interm_tensor_dict
-
-
-def accumulate_interm_tensor_dict(GVM: GlobalVarsManager, cached_interm_tensor_dict: dict[int, dict[str, Tensor]], new_interm_tensor_dict: dict[int, dict[str, Tensor]]) -> dict[int, dict[str, Tensor]]:
-    assert len(new_interm_tensor_dict) > 0
-    args = GVM.args
-
-    if cached_interm_tensor_dict == {}:
-        merged_interm_tensor_dict = new_interm_tensor_dict
-    else:
-        assert (_lc := list(cached_interm_tensor_dict.keys())) == (_ln := list(new_interm_tensor_dict.keys())), f"{_lc}, {_ln}"
-        merged_interm_tensor_dict: dict[int, Tensor] = {}
-        for _pid in cached_interm_tensor_dict.keys():
-            merged_interm_tensor_dict[_pid] = {}
-            for _mname in cached_interm_tensor_dict[_pid].keys():
-                _cached_tensor = cached_interm_tensor_dict[_pid][_mname]
-                _new_tensor = new_interm_tensor_dict[_pid][_mname]
-                assert _cached_tensor.shape == _new_tensor.shape
-
-                match args.null_interm_accum:
-                    case 'sum':
-                        merged_interm_tensor_dict[_pid][_mname] = _cached_tensor + _new_tensor
-                    case 'mean':
-                        _num_list: list[int] = GVM.cache_dict['interm_sample_list']
-                        merged_interm_tensor_dict[_pid][_mname] = sum(_num_list[:-1]) / sum(_num_list) * _cached_tensor + _num_list[-1] / sum(_num_list) * _new_tensor
-                    case _:
-                        raise ValueError()
-    return merged_interm_tensor_dict
-
-
-def get_update_projection_dict(GVM: GlobalVarsManager, null_param_id_dict: dict, interm_tensor_dict: dict[int, dict[str, Tensor]]) -> dict[int, dict[str, Tensor]]:
-    args = GVM.args
-    update_proj_dict = {}
-
-    def adaptive_threshold(svals: torch.Tensor, offset: float = 0):
-        points: np.ndarray = svals.cpu().numpy()
-        assert points.ndim == 1
-        if len(points) >= 128:
-            fil_points = scipy.ndimage.gaussian_filter1d(points, sigma=10)
-            _delta = 1
-            diff_o1 = fil_points[:-_delta] - fil_points[_delta:]
-            diff_o2 = diff_o1[:-1] - diff_o1[1:]
-            _drop_ratio = 0.03
-            drop_num = int(len(points) * _drop_ratio / 2)
-            assert len(points) - drop_num >= 10
-            valid_o2 = diff_o2[drop_num:-drop_num]
-            thres_val = points[np.argmax(valid_o2) + int((len(points) - len(valid_o2)) / 2)]
-        else:
-            diff_o1 = points[:-1] - points[1:]
-            diff_o2 = diff_o1[:-1] - diff_o1[1:]
-            thres_val = points[np.argmax(diff_o2) + int((len(points) - len(diff_o2)) / 2)]
-        i_thres = np.arange(len(points))[points >= thres_val].max()
-        if 0 <= offset < 1:
-            i_thres = min(i_thres + int(offset * (len(points) - i_thres)), len(points) - 1)
-        else:
-            i_thres = max(min(i_thres + int(offset), len(points) - 1), 0)
-
-        zero_idx = np.zeros(len(points), dtype=np.int64)
-        zero_idx[i_thres:] = 1
-        zero_idx = torch.as_tensor(torch.from_numpy(zero_idx), dtype=torch.bool, device=svals.device)
-        return zero_idx
-
-    svals_dict = OrderedDict()
-    zero_idx_dict = OrderedDict()
-    for _pid in interm_tensor_dict.keys():
-        update_proj_dict[_pid] = {}
-        for _mname in interm_tensor_dict[_pid].keys():
-            U, S, Vt = torch.linalg.svd(interm_tensor_dict[_pid][_mname], full_matrices=True)  # A=U@diag(S)@Vt
-            S: Tensor
-            Vt: Tensor
-            zero_idx = adaptive_threshold(S)
-            zero_idx: torch.BoolTensor
-            assert torch.count_nonzero(zero_idx) > 0, f"{zero_idx}, {type(zero_idx)}, {torch.count_nonzero(zero_idx)}"
-
-            svals_dict[_dkey := f"{null_param_id_dict[_pid]['name']}-{_mname}"] = S.cpu().clone()
-            zero_idx_dict[_dkey] = zero_idx.cpu().clone()
-
-            basis = Vt[zero_idx]
-            proj = basis.T @ basis
-            proj = proj / torch.norm(proj)
-
-            assert proj.shape[0] == proj.shape[1], proj.shape
-
-            null_eta: float = args.null_eta
-            update_proj_dict[_pid][_mname] = null_eta * proj.detach() + (1 - null_eta) * torch.eye(proj.shape[0], device=proj.device, dtype=proj.dtype)
-
-    return update_proj_dict
-
-
-def extract_class_features(GVM: GlobalVarsManager, model: DefocusAttentionNetwork) -> None:
-    model = set_model_mode(GVM, model, training=False)
-
-    dataset = define_dataset(GVM, GVM.cl_mngr.current_task_classes, training=True, transform_type=args.transform_type, target_map_to_local=False, use_eval_transform=True, expand_times=1)
-    dataloader = DataLoader(dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=args.eval_workers, pin_memory=True, timeout=args.timeout if args.eval_workers > 0 else 0)
-
-    feats = torch.empty([len(dataset), 1024], dtype=torch.float32)
-    label = torch.empty([len(dataset)], dtype=torch.long)
-
-    smp_idx = 0
-    for img, lbl in dataloader:
-        with torch.no_grad():
-            img: Tensor
-            lbl: Tensor
-            _feat = model.encode_image(img.cuda(non_blocking=True), pre_logits=True).cpu()
-            for _f, _l in zip(_feat, lbl):
-                feats[smp_idx] = _f
-                label[smp_idx] = _l
-                smp_idx += 1
-    assert smp_idx == len(dataset)
-
-    if GVM.args.refine_head:
-        _mean_list = []
-        _cov_list = []
-        _class_list = []
-        for _l in label.unique():
-            _cls_feats = feats[label == _l]
-            _mean_list.append(torch.mean(_cls_feats, dim=0, keepdim=False))
-            _cov_list.append(torch.cov(torch.tensor(_cls_feats, dtype=torch.float64).T) + torch.eye(_cls_feats.shape[-1]) * 1e-4)
-            _class_list.append(_l)
-        _mean_list = torch.stack(_mean_list)
-        _cov_list = torch.stack(_cov_list)
-        _class_list = torch.stack(_class_list)
-
-        _key = 'class_features'
-        if _key not in GVM.cache_dict:
-            GVM.cache_dict[_key] = {'mean': _mean_list, 'cov': _cov_list, 'class': _class_list}
-        else:
-            GVM.cache_dict[_key]['mean'] = torch.cat([GVM.cache_dict[_key]['mean'], _mean_list])
-            GVM.cache_dict[_key]['cov'] = torch.cat([GVM.cache_dict[_key]['cov'], _cov_list])
-            GVM.cache_dict[_key]['class'] = torch.cat([GVM.cache_dict[_key]['class'], _class_list])
-            assert len(GVM.cache_dict[_key]['mean']) == len(GVM.cache_dict[_key]['cov']) == len(GVM.cache_dict[_key]['class']) == len(GVM.cl_mngr.sofar_task_classes)
-
-    return None
-
-
-def refine_head(GVM: GlobalVarsManager, model: DefocusAttentionNetwork):
-    feats_mean: Tensor = GVM.cache_dict['class_features']['mean']
-    feats_cov: Tensor = GVM.cache_dict['class_features']['cov']
-    feats_class: Tensor = GVM.cache_dict['class_features']['class']
-    assert len(feats_class.unique()) == len(GVM.cl_mngr.sofar_task_classes)
-
-    stat_dataset = TensorDataset(feats_mean, feats_cov, feats_class)
-
-    model = modify_head(GVM, model, training=False)
-    mhead = model.head
-
-    mhead.train()
-    mhead.cuda()
-    mhead.requires_grad_()
-
-    optimizer = create_optimizer_v2(mhead, opt='sgd', lr=0.001, weight_decay=1e-4, momentum=0.9)
-    scheduler, num_epochs = create_scheduler_v2(optimizer, 'multistep', num_epochs=GVM.args.refine_epochs, decay_milestones=[999,], decay_rate=0.1)
-    criterion = nn.CrossEntropyLoss().cuda()
-    from torch.distributions.multivariate_normal import MultivariateNormal
-
-    scalar_meter = misc.ScalarMeter(loss="samp_avg:.4f", acc_top1="samp_avg:>6.2%")
-    for epoch in range(1, num_epochs + 1):
+    for epoch in range(start_epoch, args.epochs):
+        _etimer = ttime()
+        stats = train_one_epoch(R, t, epoch, model, old_net, loader_train, optimizer, criterion, mixup_fn, scaler)
         scheduler.step(epoch)
-
-        smp_inp = []
-        smp_tgt = []
-        assert len(stat_dataset) == len(GVM.cl_mngr.sofar_task_classes)
-        _ns = 256
-        for _cmean, _ccov, _cclass in stat_dataset:
-            if not GVM.args.rand_conv:
-                m = MultivariateNormal(_cmean.float(), _ccov.float())
+        val_acc = cl_evaluate(R, model, loader_val, t, current=True)[f'class_{t}_acc']
+        improved = val_acc > best_acc
+        if improved:
+            best_acc, best_epoch = val_acc, epoch
+            if best_path:
+                atomic_save({'task': t, 'epoch': epoch, 'val_acc': val_acc, 'model': model.state_dict()}, best_path)
             else:
-                _tmp = torch.randn([1, _cmean.shape[0]], device=_cmean.device)
-                _tmp = torch.matmul(_tmp.T, _tmp)
-                _tmp = torch.eye(_cmean.shape[0]) + _tmp
-                m = MultivariateNormal(_cmean.float(), _tmp)
-            _smp = m.sample(sample_shape=(_ns,))
-            smp_inp.append(_smp)
-            smp_tgt.append(torch.as_tensor([_cclass,] * _ns, dtype=torch.long))
-        smp_inp = torch.cat(smp_inp)
-        smp_tgt = torch.cat(smp_tgt)
+                best_state = deepcopy(model.state_dict())
+        print(f"Task [{t + 1}/{args.num_tasks}] Epoch [{epoch + 1:>2}/{args.epochs}]:: loss={stats['loss']:.4f} reg={stats['reg_loss']:.4f} "
+              f"train_acc={stats['acc']:6.2%} lr={stats['lr']:.3g} val_acc={val_acc:6.2%}{' *' if improved else ''} "
+              f"time={ttime() - _etimer:.0f}s", flush=True)
+        if args.use_wandb:
+            import wandb
+            wandb.log({'task': t, 'epoch': epoch, 'train/loss': stats['loss'], 'train/reg_loss': stats['reg_loss'],
+                       'train/acc': stats['acc'], 'lr': stats['lr'], 'val/acc': val_acc})
+        if R.run_dir:
+            atomic_save({'task': t, 'epoch': epoch, 'model': model.state_dict(), 'optimizer': optimizer.state_dict(),
+                         'scaler': scaler.state_dict() if args.use_amp else None, 'best_acc': best_acc, 'best_epoch': best_epoch,
+                         'rng': rng_state(R)}, os.path.join(R.run_dir, CKPT_EPOCH))
+            if args.hf_sync_every > 0 and (epoch + 1) % args.hf_sync_every == 0 and epoch + 1 < args.epochs:
+                push(R, CKPT_BEST, f"task {t + 1} best model")  # before epoch.pt, which refers to it
+                push(R, CKPT_EPOCH, f"task {t + 1} epoch {epoch + 1}")
 
-        train_data = TensorDataset(smp_inp, smp_tgt)
-        assert len(train_data) == len(stat_dataset) * _ns
-        dataloader = DataLoader(train_data, batch_size=256, shuffle=True)
+    best = torch.load(best_path, map_location='cpu', weights_only=False)['model'] if best_path else best_state
+    model.load_state_dict(best)
+    print(f"Task [{t + 1}/{args.num_tasks}]:: loaded best model from epoch {best_epoch + 1} (val {best_acc:.2%}); "
+          f"training time {(ttime() - _ttimer) / 60:.1f} min", flush=True)
 
-        for inp, tgt in dataloader:
-            out: Tensor = mhead(inp.cuda(non_blocking=True))
-            logits = out
-            loss: Tensor = criterion(logits / GVM.args.temperature, tgt.cuda(non_blocking=True))
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+def main():
+    args = get_args()
+    R = Run()
+    R.args = args
+    R.accum = {}
+    R.start_time = ttime()
 
-            acc_top1, = misc.calc_accuracy(logits.cpu(), tgt.cpu(), topk=(1, ))
-            scalar_meter.add_step_value(len(inp), loss=loss.item(), acc_top1=acc_top1)
-        if (epoch % 10 == 0 or epoch == num_epochs):
-            print(f":: {inspect.stack()[0].function}: epoch [{epoch}/{num_epochs}]: {scalar_meter.format_outout(scalar_meter.update_epoch_average_value())}")
+    seed = args.seed
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = True
+    R.g = torch.Generator()
+    R.g.manual_seed(0)
+
+    def seed_worker(worker_id):
+        worker_seed = torch.initial_seed() % 2 ** 32
+        np.random.seed(worker_seed)
+        random.seed(worker_seed)
+
+    print(f":: run {run_name(args)}")
+    print(f":: lr={args.lr:g} warmup_lr={args.warmup_lr:g} min_lr={args.min_lr:g} task_lr_scaling={args.task_lr_scaling:g} "
+          f"reg_lambda={args.reg_lambda:g} batch={args.batch_size} epochs={args.epochs} amp={args.use_amp} grad_ckpt={args.grad_ckpt}")
+    if args.data_parallel:
+        print(f":: data_parallel: batches split across {torch.cuda.device_count()} GPU(s)")
+
+    partition_path = None
+    if args.ckpt_dir:
+        os.makedirs(_rd := os.path.join(args.ckpt_dir, run_name(args)), exist_ok=True)
+        partition_path = os.path.join(_rd, 'partition.json')
+    ds_train, ds_val, ds_test = build_cl_splits(args, R.g, partition_path)
+    loader_kw = dict(num_workers=args.workers, pin_memory=True, worker_init_fn=seed_worker, generator=R.g)
+    loader_train = DataLoader(ds_train, sampler=RandomSampler(ds_train), batch_size=args.batch_size, drop_last=True, **loader_kw)
+    loader_val = DataLoader(ds_val, sampler=SequentialSampler(ds_val), batch_size=args.batch_size * 2, drop_last=False, **loader_kw)
+    loader_test = DataLoader(ds_test, sampler=SequentialSampler(ds_test), batch_size=args.batch_size * 2, drop_last=False, **loader_kw)
+
+    mixup_fn = None
+    if args.mixup > 0 or args.cutmix > 0:
+        mixup_fn = Mixup(mixup_alpha=args.mixup, cutmix_alpha=args.cutmix, prob=args.mixup_prob, switch_prob=args.mixup_switch_prob,
+                         mode=args.mixup_mode, label_smoothing=args.smoothing, num_classes=args.nb_classes)
+    criterion = SoftTargetCrossEntropy()
+
+    model = MODELS[args.model](num_classes=args.nb_classes, drop_path_rate=args.drop_path, img_size=args.input_size, grad_ckpt=args.grad_ckpt,
+                               **({'depth': args.depth} if args.depth else {}))
+    if (ckpt_path := resolve_checkpoint(args)) is not None:
+        load_finetune(model, ckpt_path)
+    else:
+        assert args.full_run, "--finetune none starts from random weights, which needs --full_run"
+    model.to(DEVICE)
+    print(f":: {args.model}: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.1f}M trainable params")
+
+    tasks_done = setup_checkpointing(R, model)
+    if tasks_done == args.num_tasks:
+        print(f":: all {tasks_done} tasks already done; results in {R.run_dir}/{RESULTS}")
+    if args.use_wandb:
+        init_wandb(R)
+
+    for t in range(tasks_done, args.num_tasks):
+        if t > 0 or args.full_run:
+            train_one_task(R, t, model, loader_train, loader_val, criterion, mixup_fn)
+        result = cl_evaluate(R, model, loader_test, t)
+        for k, v in result.items():
+            R.accum.setdefault(k, []).append(v)
+        print(f"Task [{t + 1}/{args.num_tasks}]:: test " + " ".join(f"T{i + 1}={result[f'class_{i}_acc']:.2%}" for i in range(t + 1)), flush=True)
+        write_results(R, t)
+        save_task_checkpoint(R, model, t)
+
+    if args.use_wandb:
+        import wandb
+        wandb.finish()
 
 
 if __name__ == "__main__":
-    args = get_args()
-    seed_etc_options(args.seed)
-
-    if getattr(args, 'use_wandb', False):
-        try:
-            import wandb
-            run_name = args.wandb_name if args.wandb_name else f"inf_ssm_{args.dataset}_seed_{args.seed}"
-            wandb.init(
-                project=args.wandb_project,
-                name=run_name,
-                config=vars(args)
-            )
-        except ImportError:
-            print("wandb package not found. Skipping wandb initialization.")
-
-    GVM = GlobalVarsManager()
-    GVM.init_from_args(args)
-    GVM.cache_dict['exp_start_time'] = ttime()
-
-    for taskid, current_task_classes in GVM.cl_mngr:
-        if taskid == 0:
-            import os
-            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils/defocus_mamba_large_22k.yaml")
-            model: DefocusAttentionNetwork = build_model(get_config(config_path))
-
-            ckpt = torch.load(args.pretrained_path, map_location='cpu')
-            model.load_state_dict(ckpt['model'], strict=False)
-            setattr(model, 'pretrained_cfg', {})
-            model.pretrained_cfg['pretrained_path'] = args.pretrained_path
-            GVM.cache_dict['pretrained_cfg'] = deepcopy(model.pretrained_cfg)
-            model.reload_params()
-            GVM.cache_dict['training_string'] = args.training_string
-
-        GVM.update_label_maps(taskid, current_task_classes)
-        model = train_one_task(GVM, taskid, current_task_classes, model)
-
-        evaluate_tasks_sofar(GVM, taskid, model)
-        task_ending_info(GVM)
-
-    if getattr(args, 'use_wandb', False):
-        try:
-            import wandb
-            wandb.finish()
-        except ImportError:
-            pass
-
+    main()

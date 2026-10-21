@@ -24,6 +24,10 @@ export WANDB_API_KEY="your_wandb_api_key"
 ```
 
 ### 3. Launch Inf-SSM on Modal Cloud GPU
+
+> **Outdated (2026-10-21):** this runner was written for the earlier De-focus-Mamba version of
+> `baselines/inf-ssm`. That folder now ports the official Vim-small code with a different CLI; see
+> `baselines/inf-ssm/readme.md` and the Kaggle notebook `notebooks/kaggle/2026-10-21_inf_ssm_vim_small_cifar100.ipynb`.
 Run Split-CIFAR100 on an NVIDIA A100-40GB GPU:
 ```bash
 modal run --detach scripts/run_modal_inf_ssm.py --dataset cifar100 --batch-size 800 --gpu A100-40GB
