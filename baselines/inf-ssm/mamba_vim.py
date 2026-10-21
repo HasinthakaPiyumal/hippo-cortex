@@ -21,14 +21,17 @@ from timm.layers import DropPath, trunc_normal_, lecun_normal_
 from torch import nn, Tensor
 from torch.utils.checkpoint import checkpoint
 
+KERNEL_IMPORT_ERRORS = {}  # why a kernel is unavailable, for the Kaggle setup check
 try:
     from mamba_ssm.ops.selective_scan_interface import selective_scan_fn
-except ImportError:
+except ImportError as e:  # also raised when mamba_ssm's own transformers import fails
     selective_scan_fn = None
+    KERNEL_IMPORT_ERRORS['mamba_ssm'] = repr(e)
 try:
     from causal_conv1d import causal_conv1d_fn
-except ImportError:
+except ImportError as e:
     causal_conv1d_fn = None
+    KERNEL_IMPORT_ERRORS['causal_conv1d'] = repr(e)
 
 
 # ---------------------------------------------------------------- kernels and their fallbacks

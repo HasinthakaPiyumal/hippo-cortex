@@ -28,7 +28,12 @@ system is solved in closed form, `P_ij = c_i c_j / (1 - a_i a_j)`, and the penal
 ## Environment
 
 Same as Mamba-CL: Python 3.11, torch 2.3.1 + cu121, `causal-conv1d==1.4.0`, `mamba-ssm==1.2.2`,
-plus `timm==1.0.9 einops numpy==1.26.4 huggingface_hub wandb`.
+plus `timm==1.0.9 einops numpy==1.26.4 transformers==4.41.2 gdown huggingface_hub wandb`.
+`transformers` must stay at 4.41.2: mamba-ssm 1.2.2 imports it, and newer releases refuse torch 2.3.1, which
+makes the mamba import fail and the model fall back to the slow PyTorch scan.
+
+CIFAR-100 is fetched from the team's Google Drive copy (`scripts/download_datasets.py`, same as Mamba-CL)
+into `<data_root>/cifar-100-python` when it is missing.
 
 The official code needs its own fork of mamba-ssm 1.1.1 (fused Vim kernels). `mamba_vim.py` builds the same
 computation from the stock `selective_scan_fn` and `causal_conv1d_fn`, so no fork is compiled. Without

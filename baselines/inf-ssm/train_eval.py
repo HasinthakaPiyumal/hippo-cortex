@@ -72,7 +72,7 @@ def str2bool(v: str) -> bool:
 def get_args():
     p = argparse.ArgumentParser(description='Inf-SSM class-incremental learning on Vim')
     p.add_argument('-d', '--dataset', required=True, choices=tuple(NUM_CLASSES))
-    p.add_argument('-dr', '--data_root', default='', help='CIFAR-100: download dir; ImageNet-R / Caltech-256: the extracted image folder')
+    p.add_argument('-dr', '--data_root', default='', help='CIFAR-100: dir holding cifar-100-python/ (fetched from the team Drive if missing); ImageNet-R / Caltech-256: the extracted image folder')
     p.add_argument('-t', '--num_tasks', type=int, default=10)
     p.add_argument('--random_class', action='store_true', help='shuffle the class order with --seed (official default: natural order)')
     p.add_argument('--seed', type=int, default=0, help='paper: 0, 10, 100')

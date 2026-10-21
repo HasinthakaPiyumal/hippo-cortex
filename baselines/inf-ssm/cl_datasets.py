@@ -11,6 +11,7 @@ Protocol details kept on purpose, to match the paper's numbers:
 """
 import json
 import os
+import sys
 
 import numpy as np
 import torch
@@ -120,11 +121,22 @@ def build_transform(is_train, args):
     return transforms.Compose(t)
 
 
+def ensure_cifar100(root: str) -> None:
+    """Fetch CIFAR-100 from the team's Google Drive copy (scripts/download_datasets.py, as for Mamba-CL)
+    into <root>/cifar-100-python, the layout torchvision expects."""
+    if os.path.isdir(os.path.join(root, 'cifar-100-python')):
+        return
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../scripts')))
+    from download_datasets import fetch_cifar100
+    fetch_cifar100(root)
+
+
 def build_dataset(is_train, args):
     transform = build_transform(is_train, args)
     seq_args = (args.num_tasks, args.random_class, args.seed)
     if args.dataset == 'cifar100':
-        dataset = SeqCIFAR100(*seq_args, args.data_root, train=is_train, transform=transform, download=True)
+        ensure_cifar100(args.data_root)
+        dataset = SeqCIFAR100(*seq_args, args.data_root, train=is_train, transform=transform)
     elif args.dataset == 'imagenet_r':
         dataset = SeqImageNetR(*seq_args, args.data_root, transform=transform)
     elif args.dataset == 'caltech256':
