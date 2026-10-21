@@ -38,7 +38,7 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
 from cl_datasets import build_cl_splits
 from inf_ssm import InfSSMForward
-from mamba_vim import MODELS, load_finetune
+from mamba_vim import KERNEL_IMPORT_ERRORS, MODELS, load_finetune
 
 CKPT_TASK, CKPT_EPOCH, CKPT_BEST = "task_end.pt", "epoch.pt", "task_best.pt"
 RESULTS, WANDB_ID = "results.json", "wandb_id.txt"
@@ -314,6 +314,13 @@ def init_wandb(R: Run) -> None:
 
 # ---------------------------------------------------------------- train / eval
 
+def gpu_mem_str() -> str:
+    if DEVICE.type != 'cuda':
+        return ""
+    peaks = [torch.cuda.max_memory_allocated(i) / 2 ** 30 for i in range(torch.cuda.device_count())]
+    return " peak_mem=" + "/".join(f"{p:.1f}" for p in peaks) + "GB"
+
+
 def maybe_parallel(R: Run, module: nn.Module) -> nn.Module:
     # DataParallel only wraps the forward pass: parameters, optimizer and checkpoints stay on the plain model
     if R.args.data_parallel and torch.cuda.device_count() > 1:
@@ -440,7 +447,7 @@ def train_one_task(R: Run, t: int, model: nn.Module, loader_train: DataLoader, l
                 best_state = deepcopy(model.state_dict())
         print(f"Task [{t + 1}/{args.num_tasks}] Epoch [{epoch + 1:>2}/{args.epochs}]:: loss={stats['loss']:.4f} reg={stats['reg_loss']:.4f} "
               f"train_acc={stats['acc']:6.2%} lr={stats['lr']:.3g} val_acc={val_acc:6.2%}{' *' if improved else ''} "
-              f"time={ttime() - _etimer:.0f}s", flush=True)
+              f"time={ttime() - _etimer:.0f}s{gpu_mem_str()}", flush=True)
         if args.use_wandb:
             import wandb
             wandb.log({'task': t, 'epoch': epoch, 'train/loss': stats['loss'], 'train/reg_loss': stats['reg_loss'],
@@ -480,6 +487,9 @@ def main():
         np.random.seed(worker_seed)
         random.seed(worker_seed)
 
+    if DEVICE.type == 'cuda' and KERNEL_IMPORT_ERRORS:
+        # the PyTorch reference scan is ~10x slower and needs several GB per layer: never train with it on a GPU
+        raise SystemExit(f"mamba CUDA kernels unavailable: {KERNEL_IMPORT_ERRORS}")
     print(f":: run {run_name(args)}")
     print(f":: lr={args.lr:g} warmup_lr={args.warmup_lr:g} min_lr={args.min_lr:g} task_lr_scaling={args.task_lr_scaling:g} "
           f"reg_lambda={args.reg_lambda:g} batch={args.batch_size} epochs={args.epochs} amp={args.use_amp} grad_ckpt={args.grad_ckpt}")

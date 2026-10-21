@@ -12,6 +12,7 @@ averaged over tokens, then over layers and both scan directions, and scaled by r
 import torch
 import torch.nn.functional as F
 from torch import nn, Tensor
+from torch.utils.checkpoint import checkpoint
 
 
 def obs_distance(A1: Tensor, C1: Tensor, A2: Tensor, C2: Tensor) -> Tensor:
@@ -36,7 +37,13 @@ def reg_loss(A1, C1, A2, C2, reg_lambda: float, mode: str = 'inf_ssm') -> Tensor
 def inf_ssm_penalty(states, old_states, reg_lambda: float, mode: str = 'inf_ssm') -> Tensor:
     """states / old_states: lists of (A, C) per layer and direction, from VisionMamba(x, return_states=True)."""
     assert len(states) == len(old_states) > 0
-    total = sum(reg_loss(A, C, A_old, C_old, reg_lambda, mode) for (A, C), (A_old, C_old) in zip(states, old_states))
+    total = 0
+    for (A, C), (A_old, C_old) in zip(states, old_states):
+        if torch.is_grad_enabled() and (A.requires_grad or C.requires_grad):
+            # recompute in backward: keeps only (A, C), not the (tokens, n, n) Gramian intermediates (~3 GB at batch 64)
+            total = total + checkpoint(reg_loss, A, C, A_old, C_old, reg_lambda, mode, use_reentrant=False)
+        else:
+            total = total + reg_loss(A, C, A_old, C_old, reg_lambda, mode)
     return total / len(states)
 
 
