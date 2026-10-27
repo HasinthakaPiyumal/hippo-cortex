@@ -50,11 +50,15 @@ def main() -> None:
 
     # ── Model setup ─────────────────────────────────────────────────────────
     backbone = MambaBackbone(
-        d_model=cfg.model.mamba_d_model,
-        n_layers=cfg.model.mamba_n_layers,
-        d_state=cfg.model.mamba_d_state,
-        n_classes=cfg.dataset.n_classes_per_task,
+        checkpoint_path=cfg.model.backbone.checkpoint_path,
+        config_path=cfg.model.backbone.config_path,
+        image_size=cfg.model.backbone.image_size,
     ).to(device)
+    if backbone.feature_dim != cfg.model.mamba_d_model:
+        raise ValueError(
+            f"model.mamba_d_model={cfg.model.mamba_d_model} but the backbone produces "
+            f"{backbone.feature_dim}-d features; the SWR generator and projector use this width."
+        )
 
     swr_gen = SWRGenerator(
         hidden_dim=cfg.model.mamba_d_model,

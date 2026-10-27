@@ -80,9 +80,9 @@ Living design doc. Update this when the architecture changes — the proposal is
 Locked decisions — do not change without updating this section and notifying the full team.
 
 ### 1. Hidden State Extraction Point
-**Decision:** Output of the last SSM layer (index `n_layers - 1`), mean-pooled across sequence length → shape `(B, d_model)`.
+**Decision:** `model.encode_image(x, pre_logits=True)` of the De-focus Mamba base network — the final-norm output at the class token → shape `(B, 768)`. This replaces the earlier toy backbone (mean-pooled last layer, `d_model=128`).
 
-**Why:** Matches Mamba-CL's extraction point exactly. Using a different layer makes Table 1 comparison invalid (Cheng et al. 2025, Section 3.2).
+**Why:** The backbone is now the exact network Mamba-CL runs (`baselines/mamba-cl`, `defocus_mamba_base.yaml`, checkpoint `defocus_mamba_base_cls.pth`), and this is the feature Mamba-CL's `extract_class_features` reads. A different network or layer makes the Table 1 comparison invalid.
 
 ### 2. Null-Space Projector Rank Budget
 **Decision:** `rank_budget = 200` singular vectors max (GPM default). Same value used in Mamba-CL.
@@ -118,6 +118,14 @@ Mamba 2 is faster (3–8×) and planned for Stage 2 (hybrid architecture on Jets
 
 ### 7. `acc_matrix` Convention
 `acc_matrix[i, j]` = accuracy on task `j` evaluated after training on task `i`. Shape `(n_tasks, n_tasks)`. Upper triangle is undefined (task `j` not yet seen).
+
+### 8. Backbone and Phase 2 (joint) scope
+**Decision:** `MambaBackbone` wraps the De-focus Mamba base network from `baselines/mamba-cl` (24 blocks, width 768), loads the pretrained checkpoint, keeps **one classification head per task**, and fine-tunes only `head`, `x_proj`, `out_proj.weight`, `A_log` (Mamba-CL `--training_string`). Images are bicubic-resized to 224 inside the backbone. The optimizer is rebuilt per task (new head included), as Mamba-CL does.
+
+**Known limitations of the Phase 2 loop** (open design questions — see the `trainer.py` module docstring):
+- `NullSpaceProjector` holds a single 768-d basis, so only the task head and `out_proj.weight` (first axis) can be projected. `x_proj_*` and `A_log` have no 768 axis; they are skipped (logged once, counted in the metrics) and train **unprotected**. Mamba-CL builds a separate basis per parameter from that layer's input activations.
+- Gradients are projected *before* AdamW, which rescales elements and can leave the null space; Mamba-CL projects the *update*.
+- Replay samples are generated in the backbone's output space, so a loss on them cannot change the backbone. The default replay term is a no-grad ELBO value kept for monitoring; `Trainer._replay_loss` is the one place to change it.
 
 ---
 

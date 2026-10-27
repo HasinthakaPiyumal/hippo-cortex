@@ -36,13 +36,24 @@ dataset:
 # Model architecture
 # -----------------------------------------------------------------------------
 model:
-  # Mamba SSM backbone
-  mamba_d_model: 128           # hidden state dimension (embedding width)
-  mamba_n_layers: 4            # number of stacked Mamba blocks
-  mamba_d_state: 16            # SSM recurrent state size (S4 parameter N)
-  mamba_expand: 2              # inner dimension = d_model × expand
-  mamba_d_conv: 4              # depthwise conv kernel width inside Mamba block
-  mamba_dropout: 0.0           # dropout on Mamba block output; 0 = disabled
+  # Backbone: De-focus Mamba base — the same network the Mamba-CL baseline runs, so
+  # results are comparable. Built from baselines/mamba-cl; only head, x_proj,
+  # out_proj.weight and A_log are fine-tuned (Mamba-CL --training_string).
+  mamba_d_model: 768           # feature width = encode_image(pre_logits=True); also the
+                               # SWR generator / null-space projector dimension
+  backbone:
+    config_path: null          # null → baselines/mamba-cl/utils/defocus_mamba_base.yaml
+    checkpoint_path: checkpoints/defocus_mamba_base_cls.pth   # gitignored, ~371 MB
+    checkpoint_url: https://github.com/OpenGVLab/De-focus-Attention-Networks/releases/download/v1.0/defocus_mamba_base_cls.pth
+    image_size: 224            # CIFAR 32x32 inputs are bicubic-resized to this in the backbone
+
+  # UNUSED since the De-focus backbone replaced the toy Mamba stack. Kept so older
+  # overrides and tooling keep parsing; nothing reads them.
+  mamba_n_layers: 4
+  mamba_d_state: 16
+  mamba_expand: 2
+  mamba_d_conv: 4
+  mamba_dropout: 0.0
 
   # Conditional VAE (SWR generator)
   cvae_latent_dim: 64          # bottleneck — compressed memory trace width
@@ -82,6 +93,13 @@ training:
   lr: 1.0e-3                   # matches Mamba-CL paper (Table 2)
   weight_decay: 1.0e-4         # L2 regularisation via AdamW decoupling
   betas: [0.9, 0.999]          # AdamW momentum terms (PyTorch defaults)
+
+  # Task heads train at lr × head_lr_scale (Mamba-CL: --lr_scale 50 on 'head').
+  # Note Mamba-CL's base lr is 2e-4 (head 1e-2); here 1e-3 × 50 = 5e-2.
+  head_lr_scale: 50.0
+
+  # Mixed precision, CUDA only: fp16 autocast + GradScaler (Mamba-CL --use_amp).
+  use_amp: true
 
   # Optimiser (CVAE — Phase 3 only)
   cvae_lr: 3.0e-4

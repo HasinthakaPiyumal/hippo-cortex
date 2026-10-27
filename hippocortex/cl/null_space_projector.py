@@ -155,6 +155,17 @@ class NullSpaceProjector:
         return projected_grad
 
     @property
+    def feature_dim(self) -> int | None:
+        """
+        Size of the feature axis project() acts on (rows of U),
+        or None while no basis has been stored.
+        """
+        if self._U is None:
+            return None
+
+        return self._U.shape[0]
+
+    @property
     def current_rank(self) -> int:
         """
         Number of protected basis directions currently stored.

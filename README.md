@@ -404,9 +404,10 @@ dataset:
   root: data/cifar100
 
 model:
-  mamba_d_model: 128        # hidden state dimension
-  mamba_n_layers: 4         # Mamba SSM layers
-  mamba_d_state: 16         # SSM state size
+  mamba_d_model: 768        # De-focus Mamba base feature width (same backbone as Mamba-CL)
+  backbone:
+    checkpoint_path: checkpoints/defocus_mamba_base_cls.pth
+    image_size: 224         # CIFAR images are resized to this inside the backbone
   cvae_latent_dim: 64       # CVAE bottleneck
   cvae_hidden_dim: 512      # CVAE MLP hidden size
   nsp_rank_budget: 200      # max singular vectors in null-space projector
