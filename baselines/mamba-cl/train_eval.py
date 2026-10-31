@@ -1,5 +1,8 @@
 import argparse
+import json
+import os
 import random
+import uuid
 from collections import OrderedDict
 import tqdm
 from typing import Any, Literal
@@ -43,9 +46,13 @@ class GlobalVarsManager:
     cache_dict: dict
     param_dict: dict[Literal['base_params', 'task_params_'], OrderedDict[str, Tensor]]
     label_map_g2l: dict[int, tuple[int, int, int]]  # {original_label: (taskid, local_label, global_label)}
+    run_dir: str | None  # <ckpt_dir>/<run_name>; None when checkpointing is off
+    hub: Any  # utils.hf_sync.HubMirror or None
 
     def init_from_args(self, args, this_file=__file__):
         self.args = args
+        self.run_dir = None
+        self.hub = None
         _dataset_class_manager = ImagePathDatasetClassManager(**{args.dataset: args.data_root})
         self.path_data_dict = {'train': _dataset_class_manager[args.dataset](train=True),
                                'eval': _dataset_class_manager[args.dataset](train=False)}
@@ -70,8 +77,10 @@ def get_args():
     parser.add_argument('-t', '--num_tasks', type=int, default=10, choices=(1, 2, 5, 10, 20, 25, 50, 100))
     parser.add_argument('--shuffle_classes', type=misc.str2bool, default=True)
     parser.add_argument('--seed', type=int, default=2024)
-    parser.add_argument('-m', '--model', type=str, default='defocus_mamba_large', choices=('defocus_mamba_large', 'defocus_mamba_base'), help='backbone; config read from utils/<model>.yaml (large uses the 22k config)')
-    parser.add_argument('--pretrained_path', type=str, default="../datasets/defocus_mamba_large_cls_21k.pth", help='')
+    parser.add_argument('-m', '--model', type=str, default='defocus_mamba_large', choices=('defocus_mamba_large', 'defocus_mamba_base', 'vim_small'),
+                        help='backbone; De-focus config read from utils/<model>.yaml (large uses the 22k config); vim_small = utils/vim_mamba.py')
+    parser.add_argument('--pretrained_path', type=str, default="../datasets/defocus_mamba_large_cls_21k.pth", help="checkpoint file; for vim_small also 'vim_small_in1k' (hustvl ImageNet weights from HF)")
+    parser.add_argument('--grad_ckpt', type=misc.str2bool, default=False, help='vim_small only: recompute each block in backward (less memory, slower)')
     parser.add_argument('--head_dim_type', type=str, choices=('task_classes', 'pretrained', 'text_dim'), default='task_classes')
     parser.add_argument('--logit_type', type=str, choices=('head_out', 'sim_imgtext'), default='head_out')
     parser.add_argument('--seperate_head', type=misc.str2bool, default=True)
@@ -93,6 +102,7 @@ def get_args():
     parser.add_argument('-et', '--expand_times', type=int, default=5)
     parser.add_argument('--temperature', type=float, default=1)
     parser.add_argument('--use_amp', type=misc.str2bool, default=False)
+    parser.add_argument('--data_parallel', type=misc.str2bool, default=False, help='split each train/eval batch across all visible GPUs (nn.DataParallel); null-space collection stays on one GPU')
     parser.add_argument('--sample_type', type=str, choices=('path', 'image'), default='image')
     parser.add_argument('--timeout', type=int, default=30)
     parser.add_argument('--persistent_workers', type=misc.str2bool, default=False)
@@ -110,6 +120,11 @@ def get_args():
     parser.add_argument('--decay_epochs', type=int, default=1000)
     parser.add_argument('--decay_rate', type=float, default=0.1)
     parser.add_argument('--use_wandb', action='store_true', help='Use wandb for logging')
+    parser.add_argument('--progress_interval', type=float, default=0, help='seconds between tqdm progress updates; 0 disables the bars')
+    parser.add_argument('--ckpt_dir', type=str, default="", help='save resumable checkpoints and results.json under <ckpt_dir>/<run_name>; empty disables')
+    parser.add_argument('--hf_repo', type=str, default="", help='Hugging Face repo id to mirror the checkpoints to (token from HF_TOKEN); needs --ckpt_dir')
+    parser.add_argument('--hf_sync_epochs', type=misc.str2bool, default=True, help='also upload the per-epoch checkpoint, not only the per-task one')
+    parser.add_argument('--hf_squash', type=misc.str2bool, default=False, help='squash the HF repo history after each task so storage keeps one copy per file')
     args = parser.parse_args()
 
     if args.interp_mode == 'auto':
@@ -178,6 +193,13 @@ def set_learning_rates(GVM: GlobalVarsManager, model: DefocusAttentionNetwork, b
     return param_lr_groups
 
 
+def forward_module(GVM: GlobalVarsManager, model: DefocusAttentionNetwork) -> nn.Module:
+    # DataParallel only wraps the forward pass: parameters, optimizer and checkpoints stay on the plain model
+    if GVM.args.data_parallel and torch.cuda.device_count() > 1:
+        return nn.DataParallel(model)
+    return model
+
+
 def train_one_epoch(GVM: GlobalVarsManager, curr_epoch: int, dataloader: DataLoader, model: DefocusAttentionNetwork, criterion: nn.CrossEntropyLoss, optimizer: torch.optim.Optimizer) -> str:
     args = GVM.args
     temperature: float = args.temperature
@@ -187,13 +209,14 @@ def train_one_epoch(GVM: GlobalVarsManager, curr_epoch: int, dataloader: DataLoa
     amp_scalar = GradScaler(enabled=use_amp)
     scalar_meter = misc.ScalarMeter(loss="samp_avg:.4f", batch_time="step_sum:.3f", acc_top1="samp_avg:>6.2%")
     _btimer = ttime()
+    fwd = forward_module(GVM, model)
 
-    for i_batch, (images, target) in tqdm.tqdm(enumerate(dataloader, 1), total=len(dataloader), dynamic_ncols=True, disable=True):
+    for i_batch, (images, target) in tqdm.tqdm(enumerate(dataloader, 1), total=len(dataloader), desc=f"Task [{GVM.cl_mngr.current_taskid + 1}] epoch [{curr_epoch}] train", dynamic_ncols=True, disable=args.progress_interval <= 0, mininterval=args.progress_interval):
         images: Tensor = images.cuda(non_blocking=True)
         target: Tensor = target.cuda(non_blocking=True)
 
         with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
-            logits: Tensor = model(images)
+            logits: Tensor = fwd(images)
 
         if i_batch == 1:
             if args.seperate_head:
@@ -272,20 +295,33 @@ def train_one_task(GVM: GlobalVarsManager, taskid: int, task_classes: list[int],
                                                 decay_rate=args.decay_rate, min_lr=args.min_lr, warmup_epochs=args.warmup_epochs, warmup_lr=args.min_lr)
     assert num_epochs == args.epochs
 
+    start_epoch = 0
+    if (_resume := GVM.cache_dict.pop('resume_epoch_state', None)) is not None and _resume['task'] == taskid:
+        load_model_state(model, _resume['model'], strict=False)
+        optimizer.load_state_dict(_resume['optimizer'])
+        set_rng_state(_resume['rng'])
+        start_epoch = _resume['epoch']
+        print(f"Task [{taskid + 1:>{len(_ntstr)}}/{_ntstr}]:: resumed after epoch {start_epoch}", flush=True)
+
     torch.cuda.empty_cache()
     for epoch in range(0, args.epochs + 1):
-        if epoch > 0:
+        if epoch > start_epoch:
             _epoch_scalar_str = train_one_epoch(GVM, epoch, dataloader, model, criterion, optimizer)
             print(f"Task [{taskid + 1:>{len(_ntstr)}}/{_ntstr}] Epoch [{epoch:>{len(_nestr := str(args.epochs))}}/{_nestr}]:: {_epoch_scalar_str}")
         scheduler.step(epoch)
+        if epoch > start_epoch:
+            save_epoch_checkpoint(GVM, model, optimizer, taskid, epoch)
 
     cache_state(GVM, taskid, epoch, model, optimizer, scheduler)
 
     if args.use_null_space and taskid + 1 < GVM.cl_mngr.num_tasks:
+        _nstimer = ttime()
+        print(f"Task [{taskid + 1:>{len(_ntstr)}}/{_ntstr}]:: null-space update started", flush=True)
         new_interm_tensor_dict = get_interm_tensor_dict(GVM, model, GVM.cache_dict['null_param_id_dict'])
         GVM.cache_dict['interm_tensor_dict'] = accumulate_interm_tensor_dict(GVM, GVM.cache_dict['interm_tensor_dict'], new_interm_tensor_dict)
         del new_interm_tensor_dict
         GVM.cache_dict['update_proj_dict'] = get_update_projection_dict(GVM, GVM.cache_dict['null_param_id_dict'], GVM.cache_dict['interm_tensor_dict'])
+        print(f"Task [{taskid + 1:>{len(_ntstr)}}/{_ntstr}]:: null-space update took {misc.format_duration(ttime() - _nstimer)}", flush=True)
 
     if args.refine_head:
         extract_class_features(GVM, model)
@@ -305,15 +341,16 @@ def evaluate_one_task(GVM: GlobalVarsManager, train_taskid: int, eval_taskid: in
     dataloader = DataLoader(dataset, batch_size=GVM.args.eval_batch_size, shuffle=False, num_workers=GVM.args.eval_workers, pin_memory=True, timeout=GVM.args.timeout if GVM.args.eval_workers > 0 else 0)
 
     set_model_mode(GVM, model, training=False)
+    fwd = forward_module(GVM, model)
     scalar_meter = misc.ScalarMeter(acc_class_inc="samp_avg:>6.2%")
 
-    for images, target in tqdm.tqdm(dataloader, total=len(dataloader), dynamic_ncols=True, disable=True):
+    for images, target in tqdm.tqdm(dataloader, total=len(dataloader), desc=f"Task [{train_taskid + 1}] eval task [{eval_taskid + 1}]", dynamic_ncols=True, disable=GVM.args.progress_interval <= 0, mininterval=GVM.args.progress_interval):
         images: Tensor = images.cuda(non_blocking=True)
         target: Tensor = target.cuda(non_blocking=True)
 
         with torch.autocast(device_type='cuda', dtype=torch.float16, enabled=use_amp):
             with torch.no_grad():
-                logits: Tensor = model(images)
+                logits: Tensor = fwd(images)
 
         assert logits.ndim == 2
         assert logits.shape[1] == len(GVM.cl_mngr.sofar_task_classes), f"{logits.shape}, {len(GVM.cl_mngr.sofar_task_classes)}"
@@ -489,7 +526,7 @@ def get_interm_tensor_dict(GVM: GlobalVarsManager, model: DefocusAttentionNetwor
 
     dataloader = DataLoader(train_dataset, batch_size=args.eval_batch_size, shuffle=False, num_workers=args.eval_workers, pin_memory=True, timeout=args.timeout if args.eval_workers > 0 else 0)
 
-    for nb, (img, _) in enumerate(dataloader, 1):
+    for nb, (img, _) in tqdm.tqdm(enumerate(dataloader, 1), total=len(dataloader), desc="null-space: collect intermediates", dynamic_ncols=True, disable=args.progress_interval <= 0, mininterval=args.progress_interval):
         with torch.no_grad():
             img: Tensor
             model(img.cuda(non_blocking=True))
@@ -568,7 +605,7 @@ def get_update_projection_dict(GVM: GlobalVarsManager, null_param_id_dict: dict,
 
     svals_dict = OrderedDict()
     zero_idx_dict = OrderedDict()
-    for _pid in interm_tensor_dict.keys():
+    for _pid in tqdm.tqdm(interm_tensor_dict.keys(), total=len(interm_tensor_dict), desc="null-space: SVD projections", dynamic_ncols=True, disable=GVM.args.progress_interval <= 0, mininterval=GVM.args.progress_interval):
         update_proj_dict[_pid] = {}
         for _mname in interm_tensor_dict[_pid].keys():
             U, S, Vt = torch.linalg.svd(interm_tensor_dict[_pid][_mname], full_matrices=True)  # A=U@diag(S)@Vt
@@ -700,46 +737,232 @@ def refine_head(GVM: GlobalVarsManager, model: DefocusAttentionNetwork):
             print(f":: {inspect.stack()[0].function}: epoch [{epoch}/{num_epochs}]: {scalar_meter.format_outout(scalar_meter.update_epoch_average_value())}")
 
 
+CKPT_TASK, CKPT_EPOCH, RESULTS, WANDB_ID = 'task_end.pt', 'epoch.pt', 'results.json', 'wandb_id.txt'
+
+
+def run_name(args: argparse.Namespace) -> str:
+    return f"mamba_cl_{args.model}_{args.dataset}_t{args.num_tasks}_e{args.epochs}_seed_{args.seed}"
+
+
+def build_vim_model(GVM: GlobalVarsManager) -> nn.Module:
+    from utils import vim_mamba
+    args = GVM.args
+    path = args.pretrained_path
+    if path == 'vim_small_in1k':
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(*vim_mamba.VIM_SMALL_IN1K)
+    model = vim_mamba.MODELS[args.model](grad_ckpt=args.grad_ckpt)
+
+    missing, unexpected = vim_mamba.load_finetune(model, path)
+    print(f":: loaded {args.model} from {path}: missing keys {missing}, unexpected keys {unexpected}")
+    if bad := [k for k in missing if not k.startswith('head.')]:
+        raise RuntimeError(f"pretrained weights did not load: {len(bad)} backbone keys missing, e.g. {bad[:4]}")
+    setattr(model, 'pretrained_cfg', {'pretrained_path': args.pretrained_path})
+    GVM.cache_dict['pretrained_cfg'] = deepcopy(model.pretrained_cfg)
+    model.reload_params()
+
+    # Vim's backward-direction A is A_b_log, which the default 'A_log' pattern does not match
+    for _k in ('training_string', 'null_patterns'):
+        _pats = tuple(getattr(args, _k))
+        if 'A_log' in _pats and 'A_b_log' not in _pats:
+            setattr(args, _k, _pats + ('A_b_log',))
+            print(f":: {args.model}: --{_k} {' '.join(getattr(args, _k))}")
+    GVM.cache_dict['training_string'] = args.training_string
+    return model
+
+
+def build_pretrained_model(GVM: GlobalVarsManager) -> DefocusAttentionNetwork:
+    args = GVM.args
+    if args.model.startswith('vim_'):
+        return build_vim_model(GVM)
+    cfg_name = "defocus_mamba_large_22k.yaml" if args.model == 'defocus_mamba_large' else f"{args.model}.yaml"
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils", cfg_name)
+    model: DefocusAttentionNetwork = build_model(get_config(config_path))
+
+    ckpt = torch.load(args.pretrained_path, map_location='cpu')
+    load_info = model.load_state_dict(ckpt['model'], strict=False)
+    print(f":: loaded {args.model}: missing keys {load_info.missing_keys}, unexpected keys {load_info.unexpected_keys}")
+    setattr(model, 'pretrained_cfg', {})
+    model.pretrained_cfg['pretrained_path'] = args.pretrained_path
+    GVM.cache_dict['pretrained_cfg'] = deepcopy(model.pretrained_cfg)
+    model.reload_params()
+    GVM.cache_dict['training_string'] = args.training_string
+    return model
+
+
+def rng_state() -> dict:
+    return {'python': random.getstate(), 'numpy': np.random.get_state(), 'torch': torch.get_rng_state(), 'cuda': torch.cuda.get_rng_state_all()}
+
+
+def set_rng_state(state: dict) -> None:
+    random.setstate(state['python'])
+    np.random.set_state(state['numpy'])
+    torch.set_rng_state(state['torch'])
+    torch.cuda.set_rng_state_all(state['cuda'][:torch.cuda.device_count()])
+
+
+def atomic_save(obj: Any, path: str) -> None:
+    # write-then-rename, so a session killed mid-save never leaves a truncated checkpoint
+    torch.save(obj, path + '.tmp')
+    os.replace(path + '.tmp', path)
+
+
+def load_model_state(model: DefocusAttentionNetwork, state: dict[str, Tensor], strict: bool = True) -> None:
+    # the head is rebuilt per task, so match its saved shape before loading
+    _w = state['head.weight']
+    if model.head.weight.shape != _w.shape:
+        _mh = model.head
+        model.head = _mh.__class__(_w.shape[1], _w.shape[0], 'head.bias' in state, _mh.weight.device, _mh.weight.dtype)
+    load_info = model.load_state_dict(state, strict=strict)
+    assert not load_info.unexpected_keys, load_info.unexpected_keys
+
+
+def save_epoch_checkpoint(GVM: GlobalVarsManager, model: DefocusAttentionNetwork, optimizer: torch.optim.Optimizer, taskid: int, epoch: int) -> None:
+    if GVM.run_dir is None:
+        return
+    # only trained params change within a task; the rest comes from task_end.pt or the pretrained weights
+    atomic_save({'task': taskid, 'epoch': epoch,
+                 'model': {n: p.detach().cpu() for n, p in model.named_parameters() if p.requires_grad},
+                 'optimizer': optimizer.state_dict(), 'rng': rng_state()}, os.path.join(GVM.run_dir, CKPT_EPOCH))
+    if GVM.hub is not None and GVM.args.hf_sync_epochs:
+        GVM.hub.push(CKPT_EPOCH, f"task {taskid + 1} epoch {epoch}")
+
+
+def write_results(GVM: GlobalVarsManager, taskid: int) -> None:
+    # accuracies are fractions in [0, 1]; forgetting at task t only looks at rows 0..t
+    _mat = GVM.acc_mat_dict['AccClassIncMat']
+    _nt = taskid + 1
+    results = {
+        'run_name': run_name(GVM.args),
+        'tasks_done': _nt,
+        'num_tasks': GVM.cl_mngr.num_tasks,
+        'finished': _nt == GVM.cl_mngr.num_tasks,
+        'avg_acc': float(GVM.acc_mat_dict['AccClassIncList'][taskid]),
+        'forgetting': float(misc.calc_forgetting(_mat[:_nt], taskid)),
+        'avg_acc_per_task': [float(_a) for _a in GVM.acc_mat_dict['AccClassIncList'][:_nt]],
+        'forgetting_per_task': [float(misc.calc_forgetting(_mat[:_t + 1], _t)) for _t in range(_nt)],
+        'acc_matrix': _mat[:_nt, :_nt].tolist(),
+        'elapsed_hours': (ttime() - GVM.cache_dict['exp_start_time']) / 3600,
+        'args': vars(GVM.args),
+    }
+    with open(os.path.join(GVM.run_dir, RESULTS), 'w') as f:
+        json.dump(results, f, indent=2, default=str)
+
+
+def save_task_checkpoint(GVM: GlobalVarsManager, model: DefocusAttentionNetwork, taskid: int) -> None:
+    if GVM.run_dir is None:
+        return
+    _skip = ('update_proj_dict', 'null_param_id_dict', 'interm_tensor_dict', 'exp_start_time', 'resume_epoch_state')
+    null_space = None
+    if GVM.args.use_null_space:
+        # these dicts are keyed by id(param), which changes between processes, so store parameter names instead
+        _id2name = {id(p): n for n, p in model.named_parameters()}
+        null_space = {'param_names': [_v['name'] for _v in GVM.cache_dict['null_param_id_dict'].values()],
+                      'interm': {_id2name[_pid]: {_k: _t.cpu() for _k, _t in _d.items()} for _pid, _d in GVM.cache_dict['interm_tensor_dict'].items()}}
+    atomic_save({'tasks_done': taskid + 1,
+                 'model': model.state_dict(),
+                 'param_dict': GVM.param_dict,
+                 'acc_mat_dict': GVM.acc_mat_dict,
+                 'cache_dict': {_k: _v for _k, _v in GVM.cache_dict.items() if _k not in _skip},
+                 'null_space': null_space,
+                 'elapsed': ttime() - GVM.cache_dict['exp_start_time'],
+                 'rng': rng_state()}, os.path.join(GVM.run_dir, CKPT_TASK))
+    write_results(GVM, taskid)
+    if os.path.exists(_p := os.path.join(GVM.run_dir, CKPT_EPOCH)):
+        os.remove(_p)
+    print(f":: checkpoint saved: {GVM.run_dir} (tasks done: {taskid + 1})", flush=True)
+
+    if GVM.hub is not None:
+        GVM.hub.push(CKPT_TASK, f"task {taskid + 1} done")
+        GVM.hub.push(RESULTS, f"results after task {taskid + 1}")
+        GVM.hub.squash_history()
+
+
+def setup_checkpointing(GVM: GlobalVarsManager, model: DefocusAttentionNetwork) -> int:
+    """Pull this run's files from the HF mirror if they are not on disk, then restore them. Returns the number of finished tasks."""
+    args = GVM.args
+    if not args.ckpt_dir:
+        assert not args.hf_repo, "--hf_repo needs --ckpt_dir"
+        return 0
+    GVM.run_dir = os.path.join(args.ckpt_dir, run_name(args))
+    os.makedirs(GVM.run_dir, exist_ok=True)
+    if args.hf_repo:
+        from utils.hf_sync import HubMirror
+        GVM.hub = HubMirror(args.hf_repo, run_name(args), args.ckpt_dir, squash=args.hf_squash)
+        if _pulled := GVM.hub.pull([CKPT_TASK, CKPT_EPOCH, RESULTS, WANDB_ID]):
+            print(f":: pulled {_pulled} from hf://{args.hf_repo}/{run_name(args)}")
+
+    tasks_done = 0
+    if os.path.exists(_p := os.path.join(GVM.run_dir, CKPT_TASK)):
+        ckpt = torch.load(_p, map_location='cpu', weights_only=False)
+        tasks_done = ckpt['tasks_done']
+        load_model_state(model, ckpt['model'])
+        GVM.param_dict, GVM.acc_mat_dict = ckpt['param_dict'], ckpt['acc_mat_dict']
+        GVM.cache_dict.update(ckpt['cache_dict'])
+        GVM.cache_dict['exp_start_time'] = ttime() - ckpt['elapsed']
+        set_rng_state(ckpt['rng'])
+        if args.use_null_space and tasks_done < GVM.cl_mngr.num_tasks:
+            _params = dict(model.named_parameters())
+            GVM.cache_dict['null_param_id_dict'] = {id(_params[n]): {'name': n, 'shape': list(_params[n].shape)} for n in ckpt['null_space']['param_names']}
+            GVM.cache_dict['interm_tensor_dict'] = {id(_params[n]): {_k: _t.cuda() for _k, _t in _d.items()} for n, _d in ckpt['null_space']['interm'].items()}
+            # projections are a deterministic function of the accumulated intermediates, so recompute rather than store them
+            GVM.cache_dict['update_proj_dict'] = get_update_projection_dict(GVM, GVM.cache_dict['null_param_id_dict'], GVM.cache_dict['interm_tensor_dict'])
+        GVM.cache_dict.setdefault('update_proj_dict', {})
+        print(f":: resumed from {_p}: {tasks_done}/{GVM.cl_mngr.num_tasks} tasks done", flush=True)
+
+    if os.path.exists(_p := os.path.join(GVM.run_dir, CKPT_EPOCH)):
+        _epoch_ckpt = torch.load(_p, map_location='cpu', weights_only=False)
+        if _epoch_ckpt['task'] == tasks_done:  # older ones belong to a task that already finished
+            GVM.cache_dict['resume_epoch_state'] = _epoch_ckpt
+    return tasks_done
+
+
+def init_wandb(GVM: GlobalVarsManager) -> None:
+    import wandb
+    _id_path = os.path.join(GVM.run_dir, WANDB_ID) if GVM.run_dir else None
+    if _id_path and os.path.exists(_id_path):
+        with open(_id_path) as f:
+            run_id = f.read().strip()
+    else:
+        run_id = uuid.uuid4().hex[:12]  # wandb.util.generate_id is gone in newer wandb releases
+    wandb.init(project="mamba-cl-baseline", name=run_name(GVM.args), config=vars(GVM.args), id=run_id, resume='allow')
+    if _id_path and not os.path.exists(_id_path):
+        with open(_id_path, 'w') as f:
+            f.write(run_id)
+        if GVM.hub is not None:
+            GVM.hub.push(WANDB_ID, "wandb run id")
+
+
 if __name__ == "__main__":
     args = get_args()
     seed_etc_options(args.seed)
-
-    if getattr(args, 'use_wandb', False):
-        try:
-            import wandb
-            wandb.init(
-                project="mamba-cl-baseline",
-                name=f"mamba_cl_{args.model}_{args.dataset}_t{args.num_tasks}_e{args.epochs}_seed_{args.seed}",
-                config=vars(args)
-            )
-        except ImportError:
-            print("wandb package not found. Skipping wandb initialization.")
 
     GVM = GlobalVarsManager()
     GVM.init_from_args(args)
     GVM.cache_dict['exp_start_time'] = ttime()
 
+    model = build_pretrained_model(GVM)
+    if args.data_parallel:
+        print(f":: data_parallel: train/eval batches split across {torch.cuda.device_count()} GPU(s)")
+    tasks_done = setup_checkpointing(GVM, model)
+    if tasks_done == GVM.cl_mngr.num_tasks:
+        print(f":: all {tasks_done} tasks already done; results in {GVM.run_dir}/{RESULTS}")
+
+    if getattr(args, 'use_wandb', False):
+        try:
+            init_wandb(GVM)
+        except ImportError:
+            print("wandb package not found. Skipping wandb initialization.")
+
     for taskid, current_task_classes in GVM.cl_mngr:
-        if taskid == 0:
-            import os
-            cfg_name = "defocus_mamba_large_22k.yaml" if args.model == 'defocus_mamba_large' else f"{args.model}.yaml"
-            config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils", cfg_name)
-            model: DefocusAttentionNetwork = build_model(get_config(config_path))
-
-            ckpt = torch.load(args.pretrained_path, map_location='cpu')
-            load_info = model.load_state_dict(ckpt['model'], strict=False)
-            print(f":: loaded {args.model}: missing keys {load_info.missing_keys}, unexpected keys {load_info.unexpected_keys}")
-            setattr(model, 'pretrained_cfg', {})
-            model.pretrained_cfg['pretrained_path'] = args.pretrained_path
-            GVM.cache_dict['pretrained_cfg'] = deepcopy(model.pretrained_cfg)
-            model.reload_params()
-            GVM.cache_dict['training_string'] = args.training_string
-
         GVM.update_label_maps(taskid, current_task_classes)
+        if taskid < tasks_done:
+            continue
         model = train_one_task(GVM, taskid, current_task_classes, model)
 
         evaluate_tasks_sofar(GVM, taskid, model)
         task_ending_info(GVM)
+        save_task_checkpoint(GVM, model, taskid)
 
     if getattr(args, 'use_wandb', False):
         try:
@@ -747,4 +970,3 @@ if __name__ == "__main__":
             wandb.finish()
         except ImportError:
             pass
-

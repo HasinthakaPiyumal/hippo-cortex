@@ -1,1 +1,0 @@
-python train_eval.py -d sdomainet --pretrained_path "${PRETRAINED_PATH:-../../defocus_mamba_large_cls_21k.pth}" --data_root "${DATA_ROOT:-../../data/domainnet}" --use_inf_ssm True --inf_ssm_lambda 2e5 --seed 2024 "$@"

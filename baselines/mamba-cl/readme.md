@@ -68,3 +68,17 @@ Please change the `root_dir` in each script to the path of the uncompressed data
 
 Please specify the `--data_root` argument in the above bash scripts to the locations of the datasets.
 Change the `--seed` argument to use different seeds (e.g., 2025, 2026).
+
+## Vim-small backbone (HippoCortex addition)
+
+`-m vim_small` runs Mamba-CL on Vision Mamba small, the backbone of our Inf-SSM baseline
+(`utils/vim_mamba.py`, same network and parameter names as `baselines/inf-ssm/mamba_vim.py`).
+`--pretrained_path vim_small_in1k` downloads the hustvl ImageNet-1K weights from Hugging Face; a file path also works.
+
+- Vim is bidirectional, so each block has 9 null-space parameters: `x_proj_{step,B,C}`, `A_log` for each
+  direction, plus `out_proj.weight`. The backward A is stored as `A_b_log`, so `A_b_log` is added to
+  `--training_string` and `--null_patterns` automatically.
+- `delta` is computed outside the scan kernel (`delta_softplus=False`), as in the De-focus mixer, so the
+  `A` and `B` readers see the real step size.
+- `--grad_ckpt True` recomputes each block in backward if a batch does not fit.
+
