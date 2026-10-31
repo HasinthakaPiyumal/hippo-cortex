@@ -77,8 +77,10 @@ def get_args():
     parser.add_argument('-t', '--num_tasks', type=int, default=10, choices=(1, 2, 5, 10, 20, 25, 50, 100))
     parser.add_argument('--shuffle_classes', type=misc.str2bool, default=True)
     parser.add_argument('--seed', type=int, default=2024)
-    parser.add_argument('-m', '--model', type=str, default='defocus_mamba_large', choices=('defocus_mamba_large', 'defocus_mamba_base'), help='backbone; config read from utils/<model>.yaml (large uses the 22k config)')
-    parser.add_argument('--pretrained_path', type=str, default="../datasets/defocus_mamba_large_cls_21k.pth", help='')
+    parser.add_argument('-m', '--model', type=str, default='defocus_mamba_large', choices=('defocus_mamba_large', 'defocus_mamba_base', 'vim_small'),
+                        help='backbone; De-focus config read from utils/<model>.yaml (large uses the 22k config); vim_small = utils/vim_mamba.py')
+    parser.add_argument('--pretrained_path', type=str, default="../datasets/defocus_mamba_large_cls_21k.pth", help="checkpoint file; for vim_small also 'vim_small_in1k' (hustvl ImageNet weights from HF)")
+    parser.add_argument('--grad_ckpt', type=misc.str2bool, default=False, help='vim_small only: recompute each block in backward (less memory, slower)')
     parser.add_argument('--head_dim_type', type=str, choices=('task_classes', 'pretrained', 'text_dim'), default='task_classes')
     parser.add_argument('--logit_type', type=str, choices=('head_out', 'sim_imgtext'), default='head_out')
     parser.add_argument('--seperate_head', type=misc.str2bool, default=True)
@@ -742,8 +744,37 @@ def run_name(args: argparse.Namespace) -> str:
     return f"mamba_cl_{args.model}_{args.dataset}_t{args.num_tasks}_e{args.epochs}_seed_{args.seed}"
 
 
+def build_vim_model(GVM: GlobalVarsManager) -> nn.Module:
+    from utils import vim_mamba
+    args = GVM.args
+    path = args.pretrained_path
+    if path == 'vim_small_in1k':
+        from huggingface_hub import hf_hub_download
+        path = hf_hub_download(*vim_mamba.VIM_SMALL_IN1K)
+    model = vim_mamba.MODELS[args.model](grad_ckpt=args.grad_ckpt)
+
+    missing, unexpected = vim_mamba.load_finetune(model, path)
+    print(f":: loaded {args.model} from {path}: missing keys {missing}, unexpected keys {unexpected}")
+    if bad := [k for k in missing if not k.startswith('head.')]:
+        raise RuntimeError(f"pretrained weights did not load: {len(bad)} backbone keys missing, e.g. {bad[:4]}")
+    setattr(model, 'pretrained_cfg', {'pretrained_path': args.pretrained_path})
+    GVM.cache_dict['pretrained_cfg'] = deepcopy(model.pretrained_cfg)
+    model.reload_params()
+
+    # Vim's backward-direction A is A_b_log, which the default 'A_log' pattern does not match
+    for _k in ('training_string', 'null_patterns'):
+        _pats = tuple(getattr(args, _k))
+        if 'A_log' in _pats and 'A_b_log' not in _pats:
+            setattr(args, _k, _pats + ('A_b_log',))
+            print(f":: {args.model}: --{_k} {' '.join(getattr(args, _k))}")
+    GVM.cache_dict['training_string'] = args.training_string
+    return model
+
+
 def build_pretrained_model(GVM: GlobalVarsManager) -> DefocusAttentionNetwork:
     args = GVM.args
+    if args.model.startswith('vim_'):
+        return build_vim_model(GVM)
     cfg_name = "defocus_mamba_large_22k.yaml" if args.model == 'defocus_mamba_large' else f"{args.model}.yaml"
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "utils", cfg_name)
     model: DefocusAttentionNetwork = build_model(get_config(config_path))
