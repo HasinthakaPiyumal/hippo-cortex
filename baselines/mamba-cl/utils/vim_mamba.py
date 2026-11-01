@@ -40,6 +40,9 @@ except ImportError:
     causal_conv1d_fn = None
 
 VIM_SMALL_IN1K = ("hustvl/Vim-small-midclstok", "vim_s_midclstok_80p5acc.pth")  # --pretrained_path vim_small_in1k
+# --pretrained_path inf_ssm_task0: the Inf-SSM authors' task-0 checkpoint (CIFAR-100, 10 tasks, natural class
+# order; released for seed 0 only), the starting point of our Inf-SSM baseline run
+INF_SSM_TASK0 = ("ileening0022/Inf-SSM", "cifar100_10task/task_0_checkpoint_seed_{seed}.pth")
 
 
 # ---------------------------------------------------------------- kernels and their fallbacks

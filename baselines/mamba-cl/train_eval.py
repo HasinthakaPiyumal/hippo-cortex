@@ -79,7 +79,7 @@ def get_args():
     parser.add_argument('--seed', type=int, default=2024)
     parser.add_argument('-m', '--model', type=str, default='defocus_mamba_large', choices=('defocus_mamba_large', 'defocus_mamba_base', 'vim_small'),
                         help='backbone; De-focus config read from utils/<model>.yaml (large uses the 22k config); vim_small = utils/vim_mamba.py')
-    parser.add_argument('--pretrained_path', type=str, default="../datasets/defocus_mamba_large_cls_21k.pth", help="checkpoint file; for vim_small also 'vim_small_in1k' (hustvl ImageNet weights from HF)")
+    parser.add_argument('--pretrained_path', type=str, default="../datasets/defocus_mamba_large_cls_21k.pth", help="checkpoint file; for vim_small also 'vim_small_in1k' (hustvl ImageNet weights from HF) or 'inf_ssm_task0' (Inf-SSM's task-0 checkpoint)")
     parser.add_argument('--grad_ckpt', type=misc.str2bool, default=False, help='vim_small only: recompute each block in backward (less memory, slower)')
     parser.add_argument('--head_dim_type', type=str, choices=('task_classes', 'pretrained', 'text_dim'), default='task_classes')
     parser.add_argument('--logit_type', type=str, choices=('head_out', 'sim_imgtext'), default='head_out')
@@ -751,6 +751,15 @@ def build_vim_model(GVM: GlobalVarsManager) -> nn.Module:
     if path == 'vim_small_in1k':
         from huggingface_hub import hf_hub_download
         path = hf_hub_download(*vim_mamba.VIM_SMALL_IN1K)
+    elif path == 'inf_ssm_task0':
+        # the Inf-SSM authors' Vim-small fine-tuned on task 0, so both baselines start from the same weights
+        if (args.dataset, args.num_tasks) != ('cifar100', 10):
+            raise SystemExit("inf_ssm_task0 is released for cifar100 with 10 tasks only")
+        if args.shuffle_classes:
+            raise SystemExit("inf_ssm_task0 was trained on classes 0-9: pass --shuffle_classes False (Inf-SSM's natural class order)")
+        from huggingface_hub import hf_hub_download
+        repo, fn = vim_mamba.INF_SSM_TASK0
+        path = hf_hub_download(repo, fn.format(seed=args.seed))
     model = vim_mamba.MODELS[args.model](grad_ckpt=args.grad_ckpt)
 
     missing, unexpected = vim_mamba.load_finetune(model, path)
