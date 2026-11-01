@@ -104,6 +104,9 @@ training:
   # Optimiser (CVAE — Phase 3 only)
   cvae_lr: 3.0e-4
   cvae_weight_decay: 0.0
+  cvae_batch_size: 256         # current-task hidden states per CVAE step (same count replayed per old task)
+  replay_samples: 512          # synthetic hidden states drawn per earlier task in Phase 3
+  consolidate: true            # false skips Phase 3 (buffer + projector stay empty)
 
   # Learning rate scheduler (cosine, per task)
   lr_scheduler: cosine         # "cosine" | "constant"
