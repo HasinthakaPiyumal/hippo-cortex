@@ -4,8 +4,10 @@ Tests for the Trainer's per-task optimizer and Phase 2 (joint) loop.
 OWNER: Praveen Dedigama
 
 CPU only, with a TinyDefocus stand-in backbone, the real SWRGenerator / StatsBuffer /
-NullSpaceProjector. consolidate() is not implemented yet, so tests play the role of the
-consolidation phase by calling ``buffer.update`` and ``projector.update`` themselves.
+NullSpaceProjector. Phase 3 is switched off (training.consolidate=false) so these tests control
+the buffer and projector exactly: they play the consolidation phase by calling
+``buffer.update`` and ``projector.update`` themselves. Phase 3 is tested in
+tests/training/test_trainer_consolidation.py and tests/cl/test_consolidation.py.
 """
 import logging
 from unittest.mock import MagicMock
@@ -32,6 +34,7 @@ def make_cfg(**training) -> "OmegaConf":
     t = dict(
         lr=1e-2, head_lr_scale=10.0, weight_decay=0.0, betas=[0.9, 0.999],
         epochs_warmup=1, epochs_joint=1, grad_clip=1.0, kl_weight=1e-3, use_amp=False,
+        consolidate=False,
     )
     t.update(training)
     return OmegaConf.create({"dataset": {"n_classes_per_task": N_CLS}, "training": t})

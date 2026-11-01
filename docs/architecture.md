@@ -45,12 +45,14 @@ Living design doc. Update this when the architecture changes — the proposal is
 
 ### Training loop
 
-1. **Awake phase** — supervised update on the current task's data.
-2. **Sleep phase (consolidation)**
-   a. Sample `Ĥ_past` from the SWR generator conditioned on each prior task id.
-   b. Compute loss on the synthetic past.
-   c. Project the gradient through `P = I − UUᵀ` before applying.
-3. After task `N` completes, fit new `(µ_N, σ²_N)` and update `U` with the new feature directions.
+1. **Awake phase** — supervised update on the current task's data (Phase 1 warmup, then Phase 2 joint,
+   where backbone gradients are projected through `P = I − UUᵀ`).
+2. **Sleep phase (consolidation, Phase 3)** — `hippocortex.cl.consolidation.consolidate`. The backbone is not updated.
+   a. Collect the real hidden states `H_N` of task `N` (eval mode, no gradients).
+   b. Sample `Ĥ_past` for each prior task id from the SWR generator *as it is before this sleep*.
+   c. Fine-tune the CVAE on `H_N` (conditioned on `N`) together with `Ĥ_past` (conditioned on their task ids),
+      so it learns task `N` without forgetting how to generate the old tasks (deep generative replay).
+3. After the sleep, fit `(µ_N, σ²_N)` from `H_N` into the stats buffer and update `U` with the new feature directions.
 
 ## Stage 2: hybrid vision architecture (proposal Figure 3)
 

@@ -8,8 +8,10 @@ Three phases per task:
                     No replay, no projection. ← IMPLEMENTED
   2. Joint:         CE on current task + replay term on SWR-generated past.
                     Gradients are projected through NullSpaceProjector. ← IMPLEMENTED
-  3. Consolidation: Call consolidate() to update StatsBuffer and NullSpaceProjector.
-                    TODO(Hasinthaka): wire in after stats_buffer + consolidation ready.
+  3. Consolidation: Collect the task's hidden states, fine-tune the SWR generator on them
+                    plus replay of earlier tasks, then update StatsBuffer and
+                    NullSpaceProjector (consolidate()). No backbone update. ← IMPLEMENTED
+                    training.consolidate: false skips it (tests that stub it).
 
 evaluate() fills one row of the acc_matrix after each task completes.
 
@@ -40,7 +42,7 @@ from hippocortex.models.backbone import MambaBackbone
 from hippocortex.models.swr_generator import SWRGenerator
 from hippocortex.cl.stats_buffer import StatsBuffer
 from hippocortex.cl.null_space_projector import NullSpaceProjector
-from hippocortex.cl.consolidation import consolidate
+from hippocortex.cl.consolidation import collect_hidden_states, consolidate as run_consolidation
 from hippocortex.utils.logging import get_logger
 
 _log = get_logger(__name__)
@@ -81,8 +83,14 @@ class Trainer:
         self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
 
         # Rebuilt for every task (see _build_optimizer). swr_gen is trained inside
-        # consolidate() during the sleep phase and is not part of it.
+        # consolidate() during the sleep phase, with swr_optimizer below.
         self.optimizer: torch.optim.Optimizer | None = None
+        # The generator keeps one optimizer across tasks: it is the same model all along.
+        self.swr_optimizer = torch.optim.Adam(
+            self.swr_gen.parameters(),
+            lr=float(cfg.training.get("cvae_lr", 3e-4)),
+            weight_decay=float(cfg.training.get("cvae_weight_decay", 0.0)),
+        )
         self._criterion = nn.CrossEntropyLoss()
         self._warned_skipped_projection = False
 
@@ -135,16 +143,17 @@ class Trainer:
         )
 
         # ── Phase 3: Consolidation ─────────────────────────────────────
-        # TODO(Hasinthaka): Implement after StatsBuffer + NullSpaceProjector ready.
-        #
-        # What goes here:
-        #   hidden_states = backbone.extract_hidden(all_task_images)
-        #   replay_loss = consolidate(
-        #       backbone, swr_gen, projector, buffer,
-        #       task_id, optimizer, hidden_states,
-        #       n_samples=512,
-        #   )
+        # Sleep: fine-tune the generator on this task + replay, store (µ, σ²), extend U.
         consolidation_loss = 0.0
+        if self.cfg.training.get("consolidate", True):
+            consolidation_loss = self.consolidate(task_id, loader)
+            _log.info(
+                "Task %d | consolidation done | elbo=%.4f | buffer tasks=%s | projector rank=%d",
+                task_id,
+                consolidation_loss,
+                self.buffer.task_ids(),
+                self.projector.current_rank,
+            )
 
         return {
             "task_id": float(task_id),
@@ -187,6 +196,30 @@ class Trainer:
         acc = correct / max(total, 1)
         _log.info("Task %d | top-1 acc=%.4f (%d/%d)", task_id, acc, correct, total)
         return acc
+
+    def consolidate(self, task_id: int, loader: DataLoader) -> float:
+        """
+        Phase 3 for ``task_id``: collect the task's hidden states from ``loader`` and run
+        hippocortex.cl.consolidation.consolidate (CVAE fine-tune with replay of earlier
+        tasks, then StatsBuffer and NullSpaceProjector updates).
+
+        Returns:
+            Mean ELBO of the CVAE fine-tune, for logging.
+        """
+        t = self.cfg.training
+        hidden = collect_hidden_states(self.backbone, loader, self.device, autocast=self._autocast)
+        return run_consolidation(
+            self.swr_gen,
+            self.projector,
+            self.buffer,
+            task_id,
+            self.swr_optimizer,
+            hidden,
+            n_samples=int(t.get("replay_samples", 512)),
+            epochs=int(t.get("epochs_consolidation", 3)),
+            batch_size=int(t.get("cvae_batch_size", 256)),
+            beta=float(t.get("kl_weight", 1.0)),
+        )
 
     # ------------------------------------------------------------------
     # Task setup
