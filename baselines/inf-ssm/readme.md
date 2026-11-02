@@ -7,6 +7,8 @@ Kaggle features we use for Mamba-CL: resumable checkpoints mirrored to Hugging F
 across GPUs, and optional gradient checkpointing.
 
 Kaggle notebook: [`notebooks/kaggle/2026-10-21_inf_ssm_vim_small_cifar100.ipynb`](../../notebooks/kaggle/2026-10-21_inf_ssm_vim_small_cifar100.ipynb).
+Sequential fine-tuning (no CL method, the lower bound), same protocol and start:
+[`notebooks/kaggle/2026-11-02_seq_finetune_vim_small_cifar100.ipynb`](../../notebooks/kaggle/2026-11-02_seq_finetune_vim_small_cifar100.ipynb).
 
 | File | What |
 |---|---|
@@ -48,6 +50,8 @@ python train_eval.py -d cifar100 -dr ../../data/cifar100 -t 10 --seed 0 --finetu
     --ckpt_dir ./checkpoints --data_parallel true --grad_ckpt true
 # all three paper seeds
 bash run_benchmark.sh cifar100 10
+# sequential fine-tuning lower bound, seed 0
+CL_METHOD=seq bash run_benchmark.sh cifar100 10 0
 ```
 
 `-d cifar100 | imagenet_r | caltech256`, `-t 5 | 10` pick the paper hyperparameters (`PRESETS` in
