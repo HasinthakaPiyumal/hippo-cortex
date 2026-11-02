@@ -3,7 +3,7 @@
 #   bash run_benchmark.sh cifar100 10            # seeds 0 10 100
 #   bash run_benchmark.sh imagenet_r 5 0         # seed 0 only
 # DATA_ROOT: CIFAR-100 download dir, or the extracted imagenet-r / 256_ObjectCategories folder.
-# CL_METHOD: reg (Inf-SSM, default) or seq (sequential fine-tuning, no CL method).
+# CL_METHOD: reg (Inf-SSM, default), seq (sequential fine-tuning, no CL method) or mamba_cl (Mamba-CL null space).
 # EXTRA: more train_eval.py flags, e.g. EXTRA="--use_wandb --grad_ckpt true".
 # Seed 0 starts from the authors' task-0 checkpoint; the authors released no other seeds, so those
 # train task 0 themselves from the ImageNet Vim-small weights (--full_run).

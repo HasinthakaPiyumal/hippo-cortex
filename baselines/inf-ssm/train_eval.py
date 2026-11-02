@@ -15,6 +15,9 @@ Protocol (as in the official scripts):
 - The base LR is multiplied by --task_lr_scaling at every task boundary, task 0 included.
 - After each task: class-incremental (and task-incremental) test accuracy on all tasks so far.
   AA = mean accuracy after the last task, AIA = mean of AA over tasks, FM = mean forgetting.
+
+`--cl_method seq` drops the penalty (sequential fine-tuning). `--cl_method mamba_cl` replaces it with
+Mamba-CL's null-space projection (mamba_cl.py), so Mamba-CL runs under this same protocol.
 """
 import argparse
 import json
@@ -36,7 +39,8 @@ from timm.scheduler import create_scheduler_v2
 from torch import nn, Tensor
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 
-from cl_datasets import build_cl_splits
+import mamba_cl
+from cl_datasets import build_cl_splits, build_transform
 from inf_ssm import InfSSMForward
 from mamba_vim import KERNEL_IMPORT_ERRORS, MODELS, load_finetune
 
@@ -81,9 +85,11 @@ def get_args():
     p.add_argument('--finetune', default='hf', help="task-0 checkpoint path; 'hf' = the authors' one for this benchmark and seed; "
                                                    "'vim_small_in1k' = ImageNet Vim-small weights (use with --full_run); 'none' = random init")
     p.add_argument('--full_run', action='store_true', help='also train task 0 (with --cl_method seq semantics, no old model)')
-    p.add_argument('--cl_method', default='reg', choices=('reg', 'seq'), help='reg = Inf-SSM, seq = plain sequential fine-tuning')
+    p.add_argument('--cl_method', default='reg', choices=('reg', 'seq', 'mamba_cl'),
+                   help='reg = Inf-SSM, seq = plain sequential fine-tuning, mamba_cl = Mamba-CL null-space projection (mamba_cl.py)')
     p.add_argument('--reg_mode', default='inf_ssm', choices=('inf_ssm', 'mse'))
     p.add_argument('--reg_lambda', type=float, default=None, help='default: the paper value for this benchmark')
+    p.add_argument('--null_eta', type=float, default=0.95, help='mamba_cl: weight of the null-space projection (Mamba-CL: 0.95, 0.90 for 10-split ImageNet-R)')
     # optimisation (None = the paper value for this benchmark)
     p.add_argument('-e', '--epochs', type=int, default=40)
     p.add_argument('-b', '--batch_size', type=int, default=128)
@@ -147,7 +153,7 @@ def get_args():
 
 
 def run_name(args) -> str:
-    lam = f"_lam{args.reg_lambda:g}" if args.cl_method == 'reg' else ""
+    lam = {'reg': f"_lam{args.reg_lambda:g}", 'mamba_cl': f"_eta{args.null_eta:g}"}.get(args.cl_method, "")
     return f"inf_ssm_{args.cl_method}{lam}_{args.model}_{args.dataset}_t{args.num_tasks}_e{args.epochs}_seed_{args.seed}"
 
 
@@ -181,6 +187,7 @@ class Run:
     accum: dict  # official accum_result: {'class_i_acc': [...], 'task_i_acc': [...], 'mean_class_acc': [...], ...}
     start_time: float
     resume_epoch: dict | None = None
+    null_space: mamba_cl.NullSpace | None = None  # --cl_method mamba_cl only
 
 
 def rng_state(R: Run) -> dict:
@@ -256,7 +263,8 @@ def save_task_checkpoint(R: Run, model: nn.Module, t: int) -> None:
     if R.run_dir is None:
         return
     atomic_save({'tasks_done': t + 1, 'model': model.state_dict(), 'accum': R.accum,
-                 'elapsed': ttime() - R.start_time, 'rng': rng_state(R)}, os.path.join(R.run_dir, CKPT_TASK))
+                 'elapsed': ttime() - R.start_time, 'rng': rng_state(R),
+                 'null_space': R.null_space.state_dict() if R.null_space is not None else None}, os.path.join(R.run_dir, CKPT_TASK))
     for fn in (CKPT_EPOCH, CKPT_BEST):
         if os.path.exists(_p := os.path.join(R.run_dir, fn)):
             os.remove(_p)
@@ -289,6 +297,8 @@ def setup_checkpointing(R: Run, model: nn.Module) -> int:
         R.accum = ckpt['accum']
         R.start_time = ttime() - ckpt['elapsed']
         set_rng_state(R, ckpt['rng'])
+        if R.null_space is not None:
+            R.null_space.load_state_dict(ckpt['null_space'], DEVICE)
         print(f":: resumed from {_p}: {tasks_done}/{args.num_tasks} tasks done", flush=True)
 
     if os.path.exists(_p := os.path.join(R.run_dir, CKPT_EPOCH)):
@@ -336,6 +346,7 @@ def train_one_epoch(R: Run, t: int, epoch: int, model: nn.Module, old_net: nn.Mo
     model.train()
     fwd = maybe_parallel(R, InfSSMForward(model, old_net, args.reg_lambda, args.reg_mode))
     pc, ac = t * args.n_classes_per_task, (t + 1) * args.n_classes_per_task
+    projected = R.null_space.params(model) if R.null_space is not None and t > 0 else []
     sums = dict(loss=0., reg_loss=0., correct=0, count=0, steps=0)
 
     for samples, targets in tqdm.tqdm(loader, total=len(loader), desc=f"Task [{t + 1}] epoch [{epoch + 1}] train", dynamic_ncols=True,
@@ -372,8 +383,11 @@ def train_one_epoch(R: Run, t: int, epoch: int, model: nn.Module, old_net: nn.Mo
         if args.clip_grad is not None:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
+        before = mamba_cl.NullSpace.snapshot(projected) if projected else None
         scaler.step(optimizer)
         scaler.update()
+        if projected:
+            mamba_cl.NullSpace.project_(projected, before)
 
         sums['correct'] += correct
         sums['count'] += samples.shape[0]
@@ -439,8 +453,13 @@ def train_one_task(R: Run, t: int, model: nn.Module, loader_train: DataLoader, l
         best_acc, best_epoch, start_epoch = ep['best_acc'], ep['best_epoch'], ep['epoch'] + 1
         print(f"Task [{t + 1}/{args.num_tasks}]:: resumed after epoch {start_epoch} (best val {best_acc:.2%} at epoch {best_epoch + 1})", flush=True)
     R.resume_epoch = None
-    print(f"Task [{t + 1}/{args.num_tasks}]:: {len(loader_train.dataset)} train images, base lr {lr:.3g}, "
-          f"{'Inf-SSM ' + args.reg_mode + f' lambda={args.reg_lambda:g}' if old_net is not None else 'no regularizer'}", flush=True)
+    if old_net is not None:
+        method = f"Inf-SSM {args.reg_mode} lambda={args.reg_lambda:g}"
+    elif R.null_space is not None and t > 0:
+        method = f"Mamba-CL null-space projection eta={args.null_eta:g} on {len(R.null_space.params(model))} parameters"
+    else:
+        method = "no regularizer"
+    print(f"Task [{t + 1}/{args.num_tasks}]:: {len(loader_train.dataset)} train images, base lr {lr:.3g}, {method}", flush=True)
 
     _ttimer = ttime()
     for epoch in range(start_epoch, args.epochs):
@@ -523,14 +542,22 @@ def main():
                          mode=args.mixup_mode, label_smoothing=args.smoothing, num_classes=args.nb_classes)
     criterion = SoftTargetCrossEntropy()
 
-    model = MODELS[args.model](num_classes=args.nb_classes, drop_path_rate=args.drop_path, img_size=args.input_size, grad_ckpt=args.grad_ckpt,
-                               **({'depth': args.depth} if args.depth else {}))
-    if (ckpt_path := resolve_checkpoint(args)) is not None:
-        load_finetune(model, ckpt_path)
+    model_kw = dict(num_classes=args.nb_classes, drop_path_rate=args.drop_path, img_size=args.input_size, grad_ckpt=args.grad_ckpt,
+                    **({'depth': args.depth} if args.depth else {}))
+    ckpt_path = resolve_checkpoint(args)
+    assert ckpt_path is not None or args.full_run, "--finetune none starts from random weights, which needs --full_run"
+    if args.cl_method == 'mamba_cl':
+        model = mamba_cl.build_model(args.model, ckpt_path, **model_kw)  # Mamba-CL's Vim: only its parameters + head train
     else:
-        assert args.full_run, "--finetune none starts from random weights, which needs --full_run"
+        model = MODELS[args.model](**model_kw)
+        if ckpt_path is not None:
+            load_finetune(model, ckpt_path)
     model.to(DEVICE)
-    print(f":: {args.model}: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.1f}M trainable params")
+    if args.cl_method == 'mamba_cl':
+        R.null_space = mamba_cl.NullSpace(model, args.null_eta)
+        print(f":: mamba_cl: {len(R.null_space.side)} null-space parameters, eta={args.null_eta:g}")
+    print(f":: {args.model}: {sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6:.1f}M trainable params "
+          f"of {sum(p.numel() for p in model.parameters()) / 1e6:.1f}M")
 
     tasks_done = setup_checkpointing(R, model)
     if tasks_done == args.num_tasks:
@@ -546,6 +573,14 @@ def main():
             R.accum.setdefault(k, []).append(v)
         print(f"Task [{t + 1}/{args.num_tasks}]:: test " + " ".join(f"T{i + 1}={result[f'class_{i}_acc']:.2%}" for i in range(t + 1)), flush=True)
         write_results(R, t)
+        if R.null_space is not None and t + 1 < args.num_tasks:
+            _ntimer = ttime()
+            loader_train.dataset.set_task(t)
+            R.null_space.collect(model, mamba_cl.eval_view(loader_train.dataset, build_transform(False, args)), args.batch_size * 2,
+                                 args.workers, DEVICE, args.progress_interval)
+            dims = sorted(R.null_space.null_dims.values())
+            print(f"Task [{t + 1}/{args.num_tasks}]:: null-space update took {ttime() - _ntimer:.0f}s "
+                  f"(null-space dims: min {dims[0]}, median {dims[len(dims) // 2]}, max {dims[-1]})", flush=True)
         save_task_checkpoint(R, model, t)
 
     if args.use_wandb:

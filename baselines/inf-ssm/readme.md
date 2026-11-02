@@ -9,12 +9,15 @@ across GPUs, and optional gradient checkpointing.
 Kaggle notebook: [`notebooks/kaggle/2026-10-21_inf_ssm_vim_small_cifar100.ipynb`](../../notebooks/kaggle/2026-10-21_inf_ssm_vim_small_cifar100.ipynb).
 Sequential fine-tuning (no CL method, the lower bound), same protocol and start:
 [`notebooks/kaggle/2026-11-02_seq_finetune_vim_small_cifar100.ipynb`](../../notebooks/kaggle/2026-11-02_seq_finetune_vim_small_cifar100.ipynb).
+Mamba-CL under this same protocol:
+[`notebooks/kaggle/2026-11-02_mamba_cl_infssm_protocol_cifar100.ipynb`](../../notebooks/kaggle/2026-11-02_mamba_cl_infssm_protocol_cifar100.ipynb).
 
 | File | What |
 |---|---|
 | `train_eval.py` | Class-incremental training + evaluation, checkpoints, HF mirror, W&B |
 | `mamba_vim.py` | Vim-small/tiny and the bidirectional Mamba mixer that exposes the per-token `(A, C)` states |
 | `inf_ssm.py` | Inf-SSM distance on the infinite Grassmannian, penalty, DataParallel-safe forward wrapper |
+| `mamba_cl.py` | Mamba-CL's null-space projection as `--cl_method mamba_cl` (model from `../mamba-cl/utils/vim_mamba.py`) |
 | `cl_datasets.py` | Split CIFAR-100 / ImageNet-R / Caltech-256 with the official splits and transforms |
 | `hf_sync.py` | Hugging Face mirror (same as Mamba-CL) |
 | `run_benchmark.sh` | Paper runs for one benchmark over seeds 0, 10, 100 |
@@ -58,6 +61,27 @@ CL_METHOD=seq bash run_benchmark.sh cifar100 10 0
 `train_eval.py`, from the official `vim/scripts/*.sh` = paper Tables 12/13). Any of `--lr --warmup_lr
 --min_lr --task_lr_scaling --reg_lambda` overrides them. `--cl_method seq` is the sequential fine-tuning
 lower bound; `--reg_mode mse` is the plain-MSE ablation.
+
+### Mamba-CL under this protocol (`--cl_method mamba_cl`)
+
+Mamba-CL's own protocol (separate head per task, Adam lr 2e-4 with a x50 head LR, AutoAugment, last epoch)
+differs from this one in almost everything but the method, so its numbers cannot be put next to Inf-SSM's.
+`--cl_method mamba_cl` keeps Mamba-CL's method and takes everything else from this trainer:
+
+- model: `../mamba-cl/utils/vim_mamba.py` (same weights and computation as `mamba_vim.py`, `x_proj` split
+  into `_step/_B/_C`, IntermReaders on the inputs of the projected parameters);
+- trained: the head plus `x_proj_{step,B,C}`, `A_log`, `A_b_log`, `out_proj.weight` of every block (Mamba-CL's
+  `--training_string`); the rest of the backbone is frozen;
+- after each task, the inputs of those 216 parameters are collected over the task's train images (eval
+  transform), summed over tasks, and Mamba-CL's adaptive SVD threshold gives the null space;
+- every AdamW step of a projected parameter is replaced by its projection `eta * P_null + (1 - eta) * I`
+  (`--null_eta`, default 0.95 as in Mamba-CL for CIFAR-100). The head is not projected.
+
+`task_end.pt` then also stores the summed covariances (~0.5 GB for Vim-small). Needs `scipy`.
+
+```bash
+CL_METHOD=mamba_cl bash run_benchmark.sh cifar100 10 0
+```
 
 Task 0 is never trained in the paper runs: they start from a Vim-small already fine-tuned on task 0.
 `--finetune hf` downloads the authors' checkpoint from
