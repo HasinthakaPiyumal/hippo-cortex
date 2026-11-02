@@ -15,6 +15,7 @@ import sys
 
 import numpy as np
 import torch
+import timm.data.auto_augment as timm_aa
 from timm.data import create_transform
 from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torchvision import datasets, transforms
@@ -22,6 +23,25 @@ from torchvision.datasets.folder import ImageFolder
 
 CIFAR100_DEFAULT_MEAN = (0.5071, 0.4867, 0.4408)
 CIFAR100_DEFAULT_STD = (0.2675, 0.2565, 0.2761)
+
+
+def _posterize(img, bits_to_keep, **__):
+    """timm's posterize with Pillow's old behaviour for 0 bits. RandAugment 'inc1' asks for 4 down to 0 bits
+    (magnitude 10 gives 0); Pillow up to 12.1 turned 0 bits into a black image, newer Pillow raises
+    'bits must be between or equal to 1 and 8' in the DataLoader worker. Same LUT as ImageOps.posterize."""
+    if bits_to_keep >= 8:
+        return img
+    mask = ~(2 ** (8 - bits_to_keep) - 1)
+    lut = [i & mask for i in range(256)]
+    if img.mode not in ("L", "RGB"):
+        raise OSError(f"posterize: mode {img.mode} not supported")
+    return img.point(lut * len(img.getbands()))
+
+
+# AugmentOp looks the function up in NAME_TO_OP when the transform is built, so patching the table is enough
+for _name, _fn in list(timm_aa.NAME_TO_OP.items()):
+    if _fn is timm_aa.posterize:
+        timm_aa.NAME_TO_OP[_name] = _posterize
 
 
 def partition_dataset(n_classes, n_tasks, randomised=False, seed=0):
