@@ -43,18 +43,7 @@ is_fast_path_available = all(
 )
 
 
-class IntermReader(nn.Module):
-    def __init__(self, dst_param_id: int, module_name: str, other_args: dict = {}) -> None:
-        super().__init__()
-        self.dst_param_id = dst_param_id
-        self.module_name = module_name
-        self.other_args = other_args
-
-    def forward(self, x: Tensor):
-        return x
-
-    def extra_repr(self) -> str:
-        return f"dst_param_id={self.dst_param_id}, module_name={self.module_name}"
+from .interm_reader import IntermReader  # noqa: E402  (re-exported: train_eval checks utils.mamba_block.IntermReader)
 
 
 class MambaMixer(nn.Module):
