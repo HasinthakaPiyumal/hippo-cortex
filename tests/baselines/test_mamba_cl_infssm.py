@@ -137,3 +137,32 @@ def test_train_one_epoch_projects_and_keeps_frozen_weights():
         assert moved.abs().max() < 1e-4 * max(delta.abs().max().item(), 1e-6) + 1e-7, pname
     assert moved_any
     assert not torch.equal(model.head.weight, start["head.weight"])  # the head is not projected
+
+
+def test_mamba_cl_optim_settings_and_head_lr(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["train_eval.py", "-d", "cifar100", "-t", "10", "--cl_method", "mamba_cl", "--optim", "mamba_cl"])
+    args = train_eval.get_args()
+    assert (args.lr, args.opt, args.weight_decay, args.task_lr_scaling, args.warmup_epochs) == (2e-4, "adam", 5e-5, 1.0, 0)
+    assert train_eval.task_lr(args, 7) == 2e-4  # no per-task scaling
+    assert "_mclopt_lr0.0002_" in train_eval.run_name(args)
+
+    model = _model()
+    optimizer, scheduler = train_eval.build_optimizer(args, model, train_eval.task_lr(args, 1))
+    backbone, head = optimizer.param_groups
+    assert backbone["lr"] == pytest.approx(2e-4) and head["lr"] == pytest.approx(2e-4 * 50)
+    named = {id(p): n for n, p in model.named_parameters()}
+    assert {named[id(p)] for p in head["params"]} == {"head.weight", "head.bias"}
+    assert len(backbone["params"]) + 2 == sum(p.requires_grad for p in model.parameters())
+    lrs = []
+    for epoch in range(args.epochs):
+        lrs.append(optimizer.param_groups[0]["lr"])
+        scheduler.step(epoch)  # as train_one_task (and Mamba-CL): after each epoch, with its index
+    assert lrs[0] == pytest.approx(2e-4) and lrs[19] == pytest.approx(2e-4)  # no warmup, flat to epoch 20
+    assert lrs[20] == pytest.approx(2e-5) and lrs[31] == pytest.approx(2e-5) and lrs[32] == pytest.approx(2e-6)
+
+
+def test_default_optim_is_unchanged(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["train_eval.py", "-d", "cifar100", "-t", "10", "--cl_method", "mamba_cl"])
+    args = train_eval.get_args()
+    assert (args.optim, args.lr, args.opt, args.task_lr_scaling) == ("inf_ssm", 1e-5, "adamw", 0.5)
+    assert "_mclopt" not in train_eval.run_name(args)

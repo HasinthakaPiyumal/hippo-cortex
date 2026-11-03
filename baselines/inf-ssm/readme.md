@@ -79,8 +79,14 @@ differs from this one in almost everything but the method, so its numbers cannot
 
 `task_end.pt` then also stores the summed covariances (~0.5 GB for Vim-small). Needs `scipy`.
 
+`--optim mamba_cl` also takes Mamba-CL's optimisation: Adam lr 2e-4 (`--lr` overrides), head LR x50
+(`--head_lr_scale`), weight decay 5e-5, no per-task LR scaling, no warmup, LR x0.1 at 50% / 80% of the epochs.
+Use it with `--cl_method mamba_cl`. With the Inf-SSM optimiser (1e-6 falling to 1e-7, made for training all
+weights), Mamba-CL's few trainable parameters do not move. Our first CIFAR-100 run stayed at T1 ≈ 97% and every
+later task near 0% (AA heading to ~10%). The run name gets `_mclopt_lr<lr>`.
+
 ```bash
-CL_METHOD=mamba_cl bash run_benchmark.sh cifar100 10 0
+CL_METHOD=mamba_cl EXTRA="--optim mamba_cl" bash run_benchmark.sh cifar100 10 0
 ```
 
 Task 0 is never trained in the paper runs: they start from a Vim-small already fine-tuned on task 0.
