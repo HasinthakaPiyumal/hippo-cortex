@@ -144,12 +144,13 @@ def test_mamba_cl_optim_settings_and_head_lr(monkeypatch):
     args = train_eval.get_args()
     assert (args.lr, args.opt, args.weight_decay, args.task_lr_scaling, args.warmup_epochs) == (2e-4, "adam", 5e-5, 1.0, 0)
     assert train_eval.task_lr(args, 7) == 2e-4  # no per-task scaling
-    assert "_mclopt_lr0.0002_" in train_eval.run_name(args)
+    assert "_mclopt_lr0.0002_hwd0_" in train_eval.run_name(args)
 
     model = _model()
     optimizer, scheduler = train_eval.build_optimizer(args, model, train_eval.task_lr(args, 1))
     backbone, head = optimizer.param_groups
     assert backbone["lr"] == pytest.approx(2e-4) and head["lr"] == pytest.approx(2e-4 * 50)
+    assert backbone["weight_decay"] == pytest.approx(5e-5) and head["weight_decay"] == 0.0
     named = {id(p): n for n, p in model.named_parameters()}
     assert {named[id(p)] for p in head["params"]} == {"head.weight", "head.bias"}
     assert len(backbone["params"]) + 2 == sum(p.requires_grad for p in model.parameters())
@@ -166,3 +167,20 @@ def test_default_optim_is_unchanged(monkeypatch):
     args = train_eval.get_args()
     assert (args.optim, args.lr, args.opt, args.task_lr_scaling) == ("inf_ssm", 1e-5, "adamw", 0.5)
     assert "_mclopt" not in train_eval.run_name(args)
+
+
+def test_mamba_cl_optim_keeps_old_class_head_rows(monkeypatch):
+    """Old-class head rows get no CE gradient (logits sliced to the current task): a task of Adam steps must leave them as
+    they are. With coupled weight decay on the head they went to 0 and every old task dropped to 0% (run cce192e0ecad)."""
+    monkeypatch.setattr(sys, "argv", ["train_eval.py", "-d", "cifar100", "-t", "10", "--cl_method", "mamba_cl", "--optim", "mamba_cl"])
+    args = train_eval.get_args()
+    model = _model()
+    optimizer, _ = train_eval.build_optimizer(args, model, args.lr)
+    w = model.head.weight
+    old_rows = w.detach()[:2].clone()
+    for _ in range(200):
+        for p in model.parameters():
+            p.grad = torch.zeros_like(p) if p.requires_grad else None
+        w.grad[2:] = torch.randn_like(w[2:])  # only the current task's classes get a gradient
+        optimizer.step()
+    assert torch.equal(w.detach()[:2], old_rows)

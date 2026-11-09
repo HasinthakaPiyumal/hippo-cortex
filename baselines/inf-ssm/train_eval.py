@@ -18,7 +18,7 @@ Protocol (as in the official scripts):
 
 `--cl_method seq` drops the penalty (sequential fine-tuning). `--cl_method mamba_cl` replaces it with
 Mamba-CL's null-space projection (mamba_cl.py), so Mamba-CL runs under this same protocol.
-`--optim mamba_cl` swaps in Mamba-CL's own optimisation (Adam lr 2e-4 with the head at x50, weight decay 5e-5,
+`--optim mamba_cl` swaps in Mamba-CL's own optimisation (Adam lr 2e-4 with the head at x50 and no weight decay, 5e-5 elsewhere,
 no per-task LR scaling, no warmup, LR x0.1 at 50%/80% of the epochs); the rest of the protocol is unchanged.
 """
 import argparse
@@ -165,7 +165,7 @@ def get_args():
 def run_name(args) -> str:
     lam = {'reg': f"_lam{args.reg_lambda:g}", 'mamba_cl': f"_eta{args.null_eta:g}"}.get(args.cl_method, "")
     if args.optim == 'mamba_cl':
-        lam += f"_mclopt_lr{args.lr:g}"
+        lam += f"_mclopt_lr{args.lr:g}_hwd0"  # _hwd0: no head weight decay (the run without it erased old tasks)
     return f"inf_ssm_{args.cl_method}{lam}_{args.model}_{args.dataset}_t{args.num_tasks}_e{args.epochs}_seed_{args.seed}"
 
 
@@ -440,10 +440,12 @@ def cl_evaluate(R: Run, model: nn.Module, loader: DataLoader, task_id: int, curr
 def build_optimizer(args, model: nn.Module, lr: float):
     """Fresh optimizer + LR schedule for one task: the paper's AdamW/cosine, or Mamba-CL's with --optim mamba_cl."""
     if args.optim == 'mamba_cl':
-        # as Mamba-CL's set_learning_rates: two groups, the head at x head_lr_scale, weight decay on every parameter
+        # as Mamba-CL's set_learning_rates: two groups, the head at x head_lr_scale. Unlike Mamba-CL the head gets no
+        # weight decay: its rows for old classes get no CE gradient here (logits are sliced to the current task, one
+        # shared head), so Adam's coupled L2 term alone would drive them to 0 at ~head lr per step and erase old tasks
         trainable = [(n, p) for n, p in model.named_parameters() if p.requires_grad]
         groups = [{'params': [p for n, p in trainable if 'head' not in n], 'lr': lr},
-                  {'params': [p for n, p in trainable if 'head' in n], 'lr': lr * args.head_lr_scale}]
+                  {'params': [p for n, p in trainable if 'head' in n], 'lr': lr * args.head_lr_scale, 'weight_decay': 0.0}]
         optimizer = create_optimizer_v2(groups, opt=args.opt, lr=lr, weight_decay=args.weight_decay, eps=args.opt_eps)
         milestones = [int(0.5 * args.epochs), int(0.8 * args.epochs)]  # Mamba-CL's [5, 8] of 10 epochs
         scheduler, _ = create_scheduler_v2(optimizer, sched='multistep', num_epochs=args.epochs, decay_milestones=milestones,
@@ -551,7 +553,7 @@ def main():
     print(f":: lr={args.lr:g} warmup_lr={args.warmup_lr:g} min_lr={args.min_lr:g} task_lr_scaling={args.task_lr_scaling:g} "
           f"reg_lambda={args.reg_lambda:g} batch={args.batch_size} micro_batch={args.micro_batch or args.batch_size} epochs={args.epochs} "
           f"amp={args.use_amp} grad_ckpt={args.grad_ckpt} optim={args.optim}"
-          + (f" (adam, head lr x{args.head_lr_scale:g}, wd {args.weight_decay:g}, multistep)" if args.optim == 'mamba_cl' else ""))
+          + (f" (adam, head lr x{args.head_lr_scale:g} wd 0, backbone wd {args.weight_decay:g}, multistep)" if args.optim == 'mamba_cl' else ""))
     if args.data_parallel:
         print(f":: data_parallel: batches split across {torch.cuda.device_count()} GPU(s)")
 

@@ -80,10 +80,16 @@ differs from this one in almost everything but the method, so its numbers cannot
 `task_end.pt` then also stores the summed covariances (~0.5 GB for Vim-small). Needs `scipy`.
 
 `--optim mamba_cl` also takes Mamba-CL's optimisation: Adam lr 2e-4 (`--lr` overrides), head LR x50
-(`--head_lr_scale`), weight decay 5e-5, no per-task LR scaling, no warmup, LR x0.1 at 50% / 80% of the epochs.
-Use it with `--cl_method mamba_cl`. With the Inf-SSM optimiser (1e-6 falling to 1e-7, made for training all
-weights), Mamba-CL's few trainable parameters do not move. Our first CIFAR-100 run stayed at T1 ≈ 97% and every
-later task near 0% (AA heading to ~10%). The run name gets `_mclopt_lr<lr>`.
+(`--head_lr_scale`), weight decay 5e-5 except on the head, no per-task LR scaling, no warmup, LR x0.1 at 50% / 80%
+of the epochs. Use it with `--cl_method mamba_cl`. With the Inf-SSM optimiser (1e-6 falling to 1e-7, made for
+training all weights), Mamba-CL's few trainable parameters do not move. Our first CIFAR-100 run stayed at T1 ≈ 97%
+and every later task near 0% (AA heading to ~10%). The run name gets `_mclopt_lr<lr>_hwd0`.
+
+The head has no weight decay because there is one shared head and the logits are sliced to the current task. The
+old-class rows get no CE gradient, so Adam's coupled L2 term alone moves them by about the head LR (1e-2) every
+step, and they reach 0 within one task. Mamba-CL has a separate head per task and never hits this. With head weight
+decay the run learned each new task to ~98% but dropped every old one to exactly 0% (AA 9.88, FM 97.4, W&B
+`cce192e0ecad`).
 
 ```bash
 CL_METHOD=mamba_cl EXTRA="--optim mamba_cl" bash run_benchmark.sh cifar100 10 0
