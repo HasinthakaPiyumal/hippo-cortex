@@ -172,8 +172,6 @@ class Trainer:
             "loss_joint": joint_loss,
             "loss_consolidation": consolidation_loss,
             "replay_loss": replay_loss,
-            "proj_params_projected": 0,
-            "proj_params_skipped": 0,
         }
 
     def evaluate(self, task_id: int, loader: DataLoader) -> float:
