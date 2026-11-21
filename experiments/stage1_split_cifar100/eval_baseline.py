@@ -234,7 +234,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--method", action="append", dest="methods", metavar="NAME",
-        help="Method name — one per --wandb_run or --log, in order",
+        help="Method name — one per source, in order. All --wandb_run sources are paired first, then --log sources, regardless of the order typed on the command line.",
     )
     parser.add_argument(
         "--out_dir", type=Path, default=_SAVE_DIR,
