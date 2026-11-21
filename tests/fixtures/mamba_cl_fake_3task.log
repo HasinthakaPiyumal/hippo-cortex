@@ -1,0 +1,10 @@
+Training Mamba-CL on Split-CIFAR100 (3 tasks, seed 2024)
+Task [1/3]:: Training time = 0:01:23
+:: ** Results of task [1]: [ class_inc_last_acc: 85.00% | class_inc_last_forg:  0.00% ] **
+:: ** Time so far: 0:01:25 **
+Task [2/3]:: Training time = 0:01:19
+:: ** Results of task [2]: [ class_inc_last_acc: 80.50% | class_inc_last_forg:  4.50% ] **
+:: ** Time so far: 0:02:46 **
+Task [3/3]:: Training time = 0:01:22
+:: ** Results of task [3]: [ class_inc_last_acc: 78.30% | class_inc_last_forg:  6.20% ] **
+:: ** Time so far: 0:04:10 **

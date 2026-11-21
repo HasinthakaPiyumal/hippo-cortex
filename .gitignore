@@ -61,6 +61,9 @@ lit-review/.obsidian/workspace*
 lit-review/.obsidian/cache
 lit-review/.trash/
 
+# Test fixtures — log files used by the test suite must be tracked
+!tests/fixtures/*.log
+
 # LaTeX build artifacts
 *.aux
 *.log

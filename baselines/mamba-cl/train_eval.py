@@ -125,6 +125,8 @@ def get_args():
     parser.add_argument('--hf_repo', type=str, default="", help='Hugging Face repo id to mirror the checkpoints to (token from HF_TOKEN); needs --ckpt_dir')
     parser.add_argument('--hf_sync_epochs', type=misc.str2bool, default=True, help='also upload the per-epoch checkpoint, not only the per-task one')
     parser.add_argument('--hf_squash', type=misc.str2bool, default=False, help='squash the HF repo history after each task so storage keeps one copy per file')
+    parser.add_argument('--track_memory', action='store_true',
+                        help='Track GPU/CPU memory per task and save summary JSON next to the log')
     args = parser.parse_args()
 
     if args.interp_mode == 'auto':
@@ -963,15 +965,42 @@ if __name__ == "__main__":
         except ImportError:
             print("wandb package not found. Skipping wandb initialization.")
 
+    _mem_tracker = None
+    if getattr(args, 'track_memory', False):
+        try:
+            import sys as _sys
+            _sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
+            from hippocortex.utils.memory_tracker import MemoryTracker
+            _device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            _mem_tracker = MemoryTracker(device=_device)
+            _mem_tracker.start()
+            print(f"[MemoryTracker] started on device={_device}")
+        except Exception as _e:
+            print(f"[MemoryTracker] could not initialise: {_e}")
+            _mem_tracker = None
+
     for taskid, current_task_classes in GVM.cl_mngr:
         GVM.update_label_maps(taskid, current_task_classes)
         if taskid < tasks_done:
             continue
+        if _mem_tracker is not None:
+            _mem_tracker.task_start(taskid)
         model = train_one_task(GVM, taskid, current_task_classes, model)
 
         evaluate_tasks_sofar(GVM, taskid, model)
         task_ending_info(GVM)
         save_task_checkpoint(GVM, model, taskid)
+        if _mem_tracker is not None:
+            _mem_tracker.task_end(taskid)
+
+    if _mem_tracker is not None:
+        _mem_tracker.stop()
+        _summary = _mem_tracker.summary()
+        _json_path = f"memory_summary_{args.dataset}_seed{args.seed}.json"
+        with open(_json_path, 'w') as _jf:
+            json.dump(_summary, _jf, indent=2, default=str)
+        print(f"[MemoryTracker] summary saved to {_json_path}")
+        _mem_tracker.print_summary()
 
     if getattr(args, 'use_wandb', False):
         try:
