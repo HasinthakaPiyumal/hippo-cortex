@@ -155,6 +155,28 @@ class TestFetchWandbRun:
         assert result["FM"] == pytest.approx(2.18)
         assert result["AIA"] is None  # not logged by mamba_cl
 
+    def test_mamba_cl_shared_head_run_logs_inf_ssm_keys(self):
+        # Mamba-CL trained with the Inf-SSM code (shared head) logs AA/AIA/FM.
+        rows = [
+            {"task": 0, "epoch": 39, "train/loss": 0.3},
+            {"task": 0, "AA": 0.97, "AIA": 0.97, "FM": 0.0},
+            {"task": 9, "AA": 0.5152, "AIA": 0.5943, "FM": 0.4862},
+        ]
+        with self._patch_api(_make_wandb_run(rows)):
+            result = fetch_wandb_run("entity/mamba-cl-baseline/3388e092e0b1", "mamba_cl")
+        assert result["AA"] == pytest.approx(51.52)
+        assert result["AIA"] == pytest.approx(59.43)
+        assert result["FM"] == pytest.approx(48.62)
+        assert result["n_tasks"] == 2
+
+    def test_scan_history_has_no_keys_filter(self):
+        # A keys= filter makes W&B drop rows that lack any listed key.
+        run = _make_wandb_run([{"task": 1, "AA": 50.0, "FM": 5.0}])
+        with self._patch_api(run):
+            fetch_wandb_run("entity/p/abc", "mamba_cl")
+        _, kwargs = run.scan_history.call_args
+        assert "keys" not in kwargs
+
     # --- duplicate task (resumed session) — last row wins ---
     def test_duplicate_task_keeps_last(self):
         rows = [

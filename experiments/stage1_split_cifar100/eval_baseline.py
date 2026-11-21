@@ -128,25 +128,36 @@ def fetch_wandb_run(run_path: str, method: str) -> Dict[str, object]:
     key_map = _WANDB_KEY_MAP.get(method, _WANDB_FALLBACK_KEYS)
     needed_wandb_keys = list(key_map.keys())
 
-    # scan_history returns all rows; filter to those that have the task key
+    # Scan every row, with no `keys=` filter: W&B returns only rows that hold
+    # ALL the keys asked for, so a run that logs other key names would come
+    # back empty. Mamba-CL trained with the Inf-SSM code (--cl_method mamba_cl,
+    # the shared-head protocol) logs AA/AIA/FM, not class_inc_last_*; rows
+    # that miss the method's keys are read with the fallback map instead.
     task_key = "task"
     rows_by_task: Dict[int, Dict[str, float]] = {}
 
-    for row in run.scan_history(keys=needed_wandb_keys):
+    def _map_row(row: dict, mapping: Dict[str, str]) -> Dict[str, float]:
+        mapped = {}
+        for wk, ck in mapping.items():
+            if ck == "task" or wk not in row or row[wk] is None:
+                continue
+            v = float(row[wk])
+            # W&B may log fractions (0–1); convert to percentage
+            if v <= 1.0:
+                v *= 100.0
+            mapped[ck] = v
+        return mapped
+
+    for row in run.scan_history():
         if task_key not in row or row[task_key] is None:
             continue
         try:
             task_id = int(row[task_key])
         except (TypeError, ValueError):
             continue
-        mapped = {}
-        for wk, ck in key_map.items():
-            if wk in row and row[wk] is not None:
-                v = float(row[wk])
-                # W&B may log fractions (0–1); convert to percentage
-                if ck in ("AA", "AIA", "FM") and v <= 1.0:
-                    v *= 100.0
-                mapped[ck] = v
+        mapped = _map_row(row, key_map)
+        if "AA" not in mapped:
+            mapped = _map_row(row, _WANDB_FALLBACK_KEYS)
         if "AA" in mapped:
             rows_by_task[task_id] = mapped  # last row for this task wins
 
