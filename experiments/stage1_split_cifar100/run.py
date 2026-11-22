@@ -4,10 +4,16 @@ Stage 1 — Split-CIFAR100 experiment entry point.
 OWNER: Hasinthaka Piyumal
 
 Usage:
-    python experiments/stage1_split_cifar100/run.py
+    python experiments/stage1_split_cifar100/run.py [key.path=value ...]
 
-Reads experiments/stage1_split_cifar100/config.yaml via OmegaConf.
-Runs 20 sequential tasks; fills acc_matrix; logs metrics to wandb.
+    # quick GPU check: 2 tasks, 1 warmup epoch, no W&B
+    WANDB_MODE=disabled python experiments/stage1_split_cifar100/run.py \
+        dataset.n_tasks=2 training.epochs_warmup=1 training.epochs_joint=0
+
+Reads experiments/stage1_split_cifar100/config.yaml via OmegaConf; command-line
+``key.path=value`` arguments override it (an unknown key is an error).
+Runs dataset.n_tasks sequential tasks (20 by default); fills acc_matrix (accuracy as
+set by eval.mode, class-incremental by default); logs metrics to wandb.
 
 After completing all tasks, saves:
   results/stage1_split_cifar100/acc_matrix.npy
@@ -16,6 +22,7 @@ After completing all tasks, saves:
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -38,8 +45,11 @@ _log = get_logger(__name__)
 _CONFIG = Path(__file__).parent / "config.yaml"
 
 
-def main() -> None:
-    cfg = load_config(_CONFIG)
+def main(argv: list[str] | None = None) -> None:
+    cfg = load_config(_CONFIG, overrides=sys.argv[1:] if argv is None else argv)
+    n_tasks = int(cfg.dataset.n_tasks)
+    if not 1 <= n_tasks <= N_TASKS:
+        raise ValueError(f"dataset.n_tasks must be in [1, {N_TASKS}], got {n_tasks}")
     set_seed(cfg.seed)
     wandb_logger.init(cfg)
 
@@ -50,11 +60,15 @@ def main() -> None:
 
     # ── Model setup ─────────────────────────────────────────────────────────
     backbone = MambaBackbone(
-        d_model=cfg.model.mamba_d_model,
-        n_layers=cfg.model.mamba_n_layers,
-        d_state=cfg.model.mamba_d_state,
-        n_classes=cfg.dataset.n_classes_per_task,
+        checkpoint_path=cfg.model.backbone.checkpoint_path,
+        config_path=cfg.model.backbone.config_path,
+        image_size=cfg.model.backbone.image_size,
     ).to(device)
+    if backbone.feature_dim != cfg.model.mamba_d_model:
+        raise ValueError(
+            f"model.mamba_d_model={cfg.model.mamba_d_model} but the backbone produces "
+            f"{backbone.feature_dim}-d features; the SWR generator and projector use this width."
+        )
 
     swr_gen = SWRGenerator(
         hidden_dim=cfg.model.mamba_d_model,
@@ -68,13 +82,13 @@ def main() -> None:
     trainer = Trainer(backbone, swr_gen, projector, buffer, cfg)
 
     # ── Training loop ────────────────────────────────────────────────────────
-    cl_metrics = ContinualMetrics(num_tasks=N_TASKS)
+    cl_metrics = ContinualMetrics(num_tasks=n_tasks)
     tracker = MemoryTracker(device=str(device))
     tracker.register_swr_buffer(buffer)
     tracker.start()
 
-    for task_id in range(N_TASKS):
-        _log.info("── Task %d / %d ──", task_id + 1, N_TASKS)
+    for task_id in range(n_tasks):
+        _log.info("── Task %d / %d ──", task_id + 1, n_tasks)
 
         tracker.task_start(task_id)
         train_loader = get_task_loaders(task_id, "train", cfg.dataset.root, cfg.training.batch_size)

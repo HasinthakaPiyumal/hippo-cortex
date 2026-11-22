@@ -232,3 +232,11 @@ def test_project_matches_gradient_device_and_dtype():
 
     assert projected.dtype == grad.dtype
     assert projected.device == grad.device        
+
+def test_feature_dim_is_none_until_update_then_matches_hidden_width():
+    """The Trainer uses feature_dim to decide which gradient axis can be projected."""
+    projector = NullSpaceProjector(rank_budget=4)
+    assert projector.feature_dim is None
+
+    projector.update(torch.randn(20, 6))
+    assert projector.feature_dim == 6
