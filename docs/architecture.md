@@ -121,11 +121,15 @@ Mamba 2 is faster (3–8×) and planned for Stage 2 (hybrid architecture on Jets
 ### 7. `acc_matrix` Convention
 `acc_matrix[i, j]` = accuracy on task `j` evaluated after training on task `i`. Shape `(n_tasks, n_tasks)`. Upper triangle is undefined (task `j` not yet seen).
 
+Accuracy is **class-incremental** by default (`eval.mode: class_il`), matching Mamba-CL's `evaluate_tasks_sofar`: after task `i`, the heads of tasks `0..i` are joined into one head over all seen classes, task `j`'s local labels are shifted by the number of classes in earlier heads, and a prediction is correct only if the argmax over every seen class is right. `eval.mode: task_il` scores each task with its own head (the task identity is given); it is easier and is not comparable to the baselines.
+
 ### 8. Backbone and Phase 2 (joint) scope
 **Decision:** `MambaBackbone` wraps the De-focus Mamba base network from `baselines/mamba-cl` (24 blocks, width 768), loads the pretrained checkpoint, keeps **one classification head per task**, and fine-tunes only `head`, `x_proj`, `out_proj.weight`, `A_log` (Mamba-CL `--training_string`). Images are bicubic-resized to 224 inside the backbone. The optimizer is rebuilt per task (new head included), as Mamba-CL does.
 
 **Known limitations of the Phase 2 loop** (open design questions — see the `trainer.py` module docstring):
-- `NullSpaceProjector` holds a single 768-d basis, so only the task head and `out_proj.weight` (first axis) can be projected. `x_proj_*` and `A_log` have no 768 axis; they are skipped (logged once, counted in the metrics) and train **unprotected**. Mamba-CL builds a separate basis per parameter from that layer's input activations.
+- `NullSpaceProjector` holds a single 768-d basis, so only `out_proj.weight` (first axis) can be projected. `x_proj_*` and `A_log` have no 768 axis; they are skipped (logged once, counted in the metrics) and train **unprotected**. Mamba-CL builds a separate basis per parameter from that layer's input activations.
+- Task heads are **not** projected, by design: earlier heads are frozen and the current head only produces the current task's logits, so projecting its gradient would protect nothing and only slow the new head down.
+- The head learning rate is `lr × head_lr_scale` = 1e-3 × 10 = 1e-2, the same as Mamba-CL (2e-4 × 50). The backbone lr is 1e-3 (Mamba-CL: 2e-4).
 - Gradients are projected *before* AdamW, which rescales elements and can leave the null space; Mamba-CL projects the *update*.
 - Replay samples are generated in the backbone's output space, so a loss on them cannot change the backbone. The default replay term is a no-grad ELBO value kept for monitoring; `Trainer._replay_loss` is the one place to change it.
 
@@ -133,15 +137,43 @@ Mamba 2 is faster (3–8×) and planned for Stage 2 (hybrid architecture on Jets
 
 ## Baseline Results
 
-*(Filled by Thagya after running `experiments/stage1_split_cifar100/eval_baseline.py`)*
+Source of truth: W&B entity `hasinthakapiyumal-uok` (Kaggle notebooks are saved without outputs).
+Regenerate the CSV (`results/stage1_split_cifar100/baselines.csv`, gitignored) with:
 
-| Method | Dataset | AA | AF | BWT | Memory (MB) | Commit / Date |
-|--------|---------|----|----|-----|-------------|---------------|
-| Mamba-CL | Split-CIFAR100 | — | — | — | — | — |
-| Inf-SSM | Split-CIFAR100 | — | — | — | — | — |
-| EWC | Split-CIFAR100 | — | — | — | — | — |
-| DGR | Split-CIFAR100 | — | — | — | — | — |
-| **HippoCortex** | Split-CIFAR100 | — | — | — | — | — |
+```bash
+python experiments/stage1_split_cifar100/eval_baseline.py   --wandb_run hasinthakapiyumal-uok/seq-finetune-baseline/aab59762ef36 --method seq   --wandb_run hasinthakapiyumal-uok/inf-ssm-baseline/d591d88c21e6 --method inf_ssm   --wandb_run hasinthakapiyumal-uok/mamba-cl-baseline/3388e092e0b1 --method mamba_cl_shared_head   --wandb_run hasinthakapiyumal-uok/mamba-cl-baseline/3427efba80b5 --method mamba_cl
+```
+
+### Main comparison: Inf-SSM protocol (Split-CIFAR100, 10 tasks × 10 classes)
+
+Vim-small, one shared 100-class head, authors' task-0 checkpoint, 40 epochs/task, batch 128, seed 0.
+All three run from `baselines/inf-ssm` (`--cl_method seq | reg | mamba_cl`).
+
+| Method | AA ↑ | AIA ↑ | FM ↓ | TIL ↑ | W&B run | Date |
+|--------|------|-------|------|-------|---------|------|
+| Sequential fine-tune (lower bound) | 21.56 | 48.89 | 39.28 | 62.76 | `seq-finetune-baseline/aab59762ef36` | 2026-11-22 |
+| Inf-SSM (λ = 3×10⁴) | 28.42 | 55.35 | 24.83 | 70.99 | `inf-ssm-baseline/d591d88c21e6` | 2026-10-22 |
+| Mamba-CL (η = 0.95, `--optim mamba_cl`, head wd 0) | 51.52 | 59.43 | 48.62 | 94.94 | `mamba-cl-baseline/3388e092e0b1` | 2026-11-10 |
+| **HippoCortex** | — | — | — | — | — | — |
+
+- Inf-SSM paper (Table 2, mean of seeds 0/10/100): AA 26.53 ± 3.10, AIA 54.24 ± 1.87, FM 24.00 ± 1.80. Ours is within one std.
+- Inf-SSM paper Seq row: AA 20.58, AIA 51.37, FM 71.49. Our AA/AIA are close; our FM is much lower — check the FM definition before quoting it.
+- Mamba-CL forgets in the shared head, not the features: old tasks keep ~95% TIL.
+- Still to run: seeds 10 and 100 for all three; ImageNet-R.
+
+### Mamba-CL, its own protocol (not comparable with the table above)
+
+Separate 10-class head per task (joined at test), `baselines/mamba-cl`, Vim-small, task-0 start `inf_ssm_task0`, seed 0:
+AA 79.52, FM 8.53 (`mamba-cl-baseline/3427efba80b5`, 2026-11-01).
+Older runs on other backbones: Defocus-Mamba large (21K) 10×10 AA 90.16 / FM 2.18 (2026-10).
+
+--------|----------|-------|----|----|--------|
+| Mamba-CL | large (21K) | 10×10 | **90.16%** | **2.18%** | reproduced run (Hasinthaka, 2026-10) |
+| Mamba-CL | base (1K)   | 20×5  | *(pending, Kaggle run)* | *(pending)* | — |
+| Inf-SSM  | base (1K)   | 20×5  | *(pending, Hasinthaka)* | *(pending)* | — |
+| EWC | — | Split-CIFAR100 | — | — | — |
+| DGR | — | Split-CIFAR100 | — | — | — |
+| **HippoCortex** | — | Split-CIFAR100 | — | — | — |
 
 ---
 

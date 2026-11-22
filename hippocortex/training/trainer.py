@@ -13,16 +13,21 @@ Three phases per task:
                     NullSpaceProjector (consolidate()). No backbone update. ← IMPLEMENTED
                     training.consolidate: false skips it (tests that stub it).
 
-evaluate() fills one row of the acc_matrix after each task completes.
+evaluate() fills one row of the acc_matrix after each task completes. By default it is
+class-incremental, as in Mamba-CL: the heads of all tasks seen so far are joined into one
+and the prediction is the argmax over every seen class. mode="task_il" scores a task with
+its own head only (the task identity is given), which is easier and not comparable.
 
 Phase 2 notes
 -------------
 * Projection scope. NullSpaceProjector holds one basis U of shape (d_model, k) built
   from the backbone's pre-logits features, so it can only project a gradient that has a
-  d_model-sized axis: the task head (…, d_model) and out_proj.weight (d_model, d_inner).
-  x_proj_* (…, d_inner) and A_log (d_inner, d_state) have no such axis and are SKIPPED
-  (one-time warning; counts are returned in the metrics). Until per-parameter bases exist
-  (as in Mamba-CL's ModAdam) those parameters train unprotected.
+  d_model-sized axis: out_proj.weight (d_model, d_inner). x_proj_* (…, d_inner) and
+  A_log (d_inner, d_state) have no such axis and are SKIPPED (one-time warning; counts
+  are returned in the metrics). Until per-parameter bases exist (as in Mamba-CL's
+  ModAdam) those parameters train unprotected. Task heads are never projected: earlier
+  heads are frozen, and the current head only produces the current task's logits, so
+  projecting it would protect nothing and only slow the new head down.
 * Projection point. The gradient is projected before AdamW, which rescales every element
   and can move the update out of the null space. Mamba-CL projects the update instead.
 * Replay term. Past hidden states come from the SWR generator, i.e. they live in the
@@ -46,6 +51,19 @@ from hippocortex.cl.consolidation import collect_hidden_states, consolidate as r
 from hippocortex.utils.logging import get_logger
 
 _log = get_logger(__name__)
+
+EVAL_MODES = ("class_il", "task_il")
+
+
+def _make_grad_scaler(enabled: bool) -> torch.amp.GradScaler:
+    """
+    torch.amp.GradScaler("cuda") (torch >= 2.3). torch.cuda.amp.GradScaler is deprecated
+    there; it is only used on older torch, e.g. 2.2.2, the last release for Intel macOS,
+    where the CPU tests run with the scaler disabled.
+    """
+    if hasattr(torch.amp, "GradScaler"):
+        return torch.amp.GradScaler("cuda", enabled=enabled)
+    return torch.cuda.amp.GradScaler(enabled=enabled)
 
 
 class Trainer:
@@ -80,7 +98,12 @@ class Trainer:
 
         # fp16 autocast + GradScaler (as Mamba-CL --use_amp); the T4 has no usable bf16.
         self.use_amp = self.device.type == "cuda" and bool(cfg.training.get("use_amp", True))
-        self.scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp)
+        self.scaler = _make_grad_scaler(enabled=self.use_amp)
+
+        # Checked here so a typo fails before training, not after the first task.
+        self.eval_mode = (cfg.get("eval") or {}).get("mode", "class_il")
+        if self.eval_mode not in EVAL_MODES:
+            raise ValueError(f"eval.mode must be one of {EVAL_MODES}, got {self.eval_mode!r}")
 
         # Rebuilt for every task (see _build_optimizer). swr_gen is trained inside
         # consolidate() during the sleep phase, with swr_optimizer below.
@@ -95,9 +118,10 @@ class Trainer:
         self._warned_skipped_projection = False
 
         _log.info(
-            "Trainer initialised | device=%s | amp=%s | lr=%s | epochs_warmup=%d | epochs_joint=%d",
+            "Trainer initialised | device=%s | amp=%s | eval=%s | lr=%s | epochs_warmup=%d | epochs_joint=%d",
             self.device,
             self.use_amp,
+            self.eval_mode,
             cfg.training.lr,
             cfg.training.epochs_warmup,
             cfg.training.epochs_joint,
@@ -165,18 +189,27 @@ class Trainer:
             "proj_params_skipped": joint["proj_params_skipped"],
         }
 
-    def evaluate(self, task_id: int, loader: DataLoader) -> float:
+    def evaluate(self, task_id: int, loader: DataLoader, mode: str | None = None) -> float:
         """
-        Evaluate the backbone on a single task's loader, using that task's own head.
+        Top-1 accuracy on one task's eval loader.
 
         Args:
-            task_id: Task to evaluate; selects head ``task_id`` of the backbone.
+            task_id: Task the loader belongs to.
             loader:  Eval DataLoader for this task.
                      Labels must be remapped to [0, n_classes_per_task).
+            mode:    "class_il" (default, from cfg.eval.mode): the heads of all tasks
+                     seen so far are joined and the argmax runs over every seen class,
+                     with labels shifted to global indices, as Mamba-CL evaluates.
+                     "task_il": only head ``task_id`` is used (task identity given).
 
         Returns:
             Top-1 accuracy in [0, 1].
         """
+        mode = self.eval_mode if mode is None else mode
+        if mode not in EVAL_MODES:
+            raise ValueError(f"mode must be one of {EVAL_MODES}, got {mode!r}")
+        offset = self.backbone.class_offset(task_id) if mode == "class_il" else 0
+
         was_training = self.backbone.training
         self.backbone.eval()
         correct = 0
@@ -187,14 +220,17 @@ class Trainer:
                 images = images.to(self.device)
                 labels = labels.to(self.device)
                 with self._autocast():
-                    logits, _hidden = self.backbone(images, task_id=task_id)
+                    if mode == "class_il":
+                        logits = self.backbone.joined_logits(self.backbone.extract_hidden(images))
+                    else:
+                        logits, _hidden = self.backbone(images, task_id=task_id)
                 preds = logits.argmax(dim=-1)
-                correct += (preds == labels).sum().item()
+                correct += (preds == labels + offset).sum().item()
                 total += labels.size(0)
 
         self.backbone.train(was_training)
         acc = correct / max(total, 1)
-        _log.info("Task %d | top-1 acc=%.4f (%d/%d)", task_id, acc, correct, total)
+        _log.info("Task %d | %s top-1 acc=%.4f (%d/%d)", task_id, mode, acc, correct, total)
         return acc
 
     def consolidate(self, task_id: int, loader: DataLoader) -> float:
@@ -397,13 +433,14 @@ class Trainer:
 
     def _project_gradients(self) -> tuple[int, int]:
         """
-        Project p.grad through the null-space projector wherever its shape allows.
+        Project the backbone's p.grad through the null-space projector where its shape allows.
 
-        NullSpaceProjector.project() acts on the LAST axis of its input and raises if that
-        axis is not d_model, so per parameter:
-          * grad.shape[-1] == d_model            -> project(grad)            (e.g. head weight)
-          * 2-D grad with grad.shape[0] == d_model -> project(grad.T).T      (e.g. out_proj.weight)
-          * otherwise                             -> skipped, left unprojected.
+        Only backbone parameters (self.backbone.model) are considered; task heads are not
+        projected (see the module docstring). NullSpaceProjector.project() acts on the LAST
+        axis of its input and raises if that axis is not d_model, so per parameter:
+          * grad.shape[-1] == d_model              -> project(grad)          (none in De-focus Mamba base)
+          * 2-D grad with grad.shape[0] == d_model -> project(grad.T).T      (out_proj.weight)
+          * otherwise                              -> skipped, left unprojected.
         With no basis yet (before the first consolidation) nothing is touched.
 
         Returns:
@@ -415,7 +452,7 @@ class Trainer:
 
         projected = 0
         skipped: list[str] = []
-        for name, p in self.backbone.named_parameters():
+        for name, p in self.backbone.model.named_parameters():
             g = p.grad
             if g is None or not p.requires_grad:
                 continue

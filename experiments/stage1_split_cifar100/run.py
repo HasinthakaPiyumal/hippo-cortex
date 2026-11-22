@@ -4,10 +4,16 @@ Stage 1 — Split-CIFAR100 experiment entry point.
 OWNER: Hasinthaka Piyumal
 
 Usage:
-    python experiments/stage1_split_cifar100/run.py
+    python experiments/stage1_split_cifar100/run.py [key.path=value ...]
 
-Reads experiments/stage1_split_cifar100/config.yaml via OmegaConf.
-Runs 20 sequential tasks; fills acc_matrix; logs metrics to wandb.
+    # quick GPU check: 2 tasks, 1 warmup epoch, no W&B
+    WANDB_MODE=disabled python experiments/stage1_split_cifar100/run.py \
+        dataset.n_tasks=2 training.epochs_warmup=1 training.epochs_joint=0
+
+Reads experiments/stage1_split_cifar100/config.yaml via OmegaConf; command-line
+``key.path=value`` arguments override it (an unknown key is an error).
+Runs dataset.n_tasks sequential tasks (20 by default); fills acc_matrix (accuracy as
+set by eval.mode, class-incremental by default); logs metrics to wandb.
 
 After completing all tasks, saves:
   results/stage1_split_cifar100/acc_matrix.npy
@@ -16,15 +22,16 @@ After completing all tasks, saves:
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
-import wandb
 
 from hippocortex.utils.seed import set_seed
 from hippocortex.utils.config import load_config
-from hippocortex.utils.logging import init_wandb, get_logger
+from hippocortex.utils.logging import get_logger
+from hippocortex.utils import wandb_logger
 from hippocortex.utils.metrics import ContinualMetrics
 from hippocortex.utils.memory_tracker import MemoryTracker
 from hippocortex.models.backbone import MambaBackbone
@@ -38,10 +45,13 @@ _log = get_logger(__name__)
 _CONFIG = Path(__file__).parent / "config.yaml"
 
 
-def main() -> None:
-    cfg = load_config(_CONFIG)
+def main(argv: list[str] | None = None) -> None:
+    cfg = load_config(_CONFIG, overrides=sys.argv[1:] if argv is None else argv)
+    n_tasks = int(cfg.dataset.n_tasks)
+    if not 1 <= n_tasks <= N_TASKS:
+        raise ValueError(f"dataset.n_tasks must be in [1, {N_TASKS}], got {n_tasks}")
     set_seed(cfg.seed)
-    init_wandb(cfg, run_name=f"hippocortex_splitcifar100_{cfg.seed}")
+    wandb_logger.init(cfg)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _log.info("Using device: %s", device)
@@ -72,26 +82,42 @@ def main() -> None:
     trainer = Trainer(backbone, swr_gen, projector, buffer, cfg)
 
     # ── Training loop ────────────────────────────────────────────────────────
-    cl_metrics = ContinualMetrics(num_tasks=N_TASKS)
+    cl_metrics = ContinualMetrics(num_tasks=n_tasks)
     tracker = MemoryTracker(device=str(device))
     tracker.register_swr_buffer(buffer)
     tracker.start()
 
-    for task_id in range(N_TASKS):
-        _log.info("── Task %d / %d ──", task_id + 1, N_TASKS)
+    for task_id in range(n_tasks):
+        _log.info("── Task %d / %d ──", task_id + 1, n_tasks)
 
         tracker.task_start(task_id)
         train_loader = get_task_loaders(task_id, "train", cfg.dataset.root, cfg.training.batch_size)
         metrics = trainer.train_task(task_id, train_loader)
         tracker.task_end(task_id)
-        wandb.log({"task": task_id, **metrics})
+
+        mem_snap = tracker.task_records[task_id].end_snapshot
+        mem_log = {
+            "memory/gpu_allocated_mb": mem_snap.gpu_allocated_mb if mem_snap else 0.0,
+            "memory/cpu_rss_mb": mem_snap.cpu_rss_mb if mem_snap else 0.0,
+            "memory/swr_buffer_mb": mem_snap.swr_buffer_mb if mem_snap else 0.0,
+        }
+
+        wandb_logger.log({"task": task_id, **metrics, **mem_log})
 
         # Evaluate on all tasks seen so far
+        accs = {}
         for eval_id in range(task_id + 1):
             test_loader = get_task_loaders(eval_id, "test", cfg.dataset.root, cfg.training.batch_size)
             acc = trainer.evaluate(eval_id, test_loader)
             cl_metrics.record(task_id, eval_id, acc)
-            wandb.log({f"acc/task_{eval_id}_after_{task_id}": acc})
+            accs[f"acc/task_{eval_id}"] = acc
+
+        cl_so_far = cl_metrics.summary()
+        wandb_logger.log({
+            **accs,
+            "AA": cl_so_far["final_aa"],
+            "FM": cl_so_far["final_fm"],
+        })
 
     tracker.stop()
 
@@ -114,8 +140,8 @@ def main() -> None:
     (save_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
     _log.info("Done. AA=%.4f  AIA=%.4f  FM=%.4f", summary["AA"], summary["AIA"], summary["FM"])
-    wandb.log(summary)
-    wandb.finish()
+    wandb_logger.log(summary)
+    wandb_logger.finish()
 
 
 if __name__ == "__main__":

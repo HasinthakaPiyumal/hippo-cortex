@@ -17,8 +17,10 @@ What it checks (each line prints PASS / FAIL; exit code 1 if any FAIL):
   4. Two tasks through Trainer.train_task (warmup + joint, fp16 AMP on CUDA): losses are finite,
      the old head is untouched, the new head and backbone parameters train, frozen ones do not.
   5. Phase 2 replay and projection actually ran on task 1 (the consolidation phase is
-     simulated here, because consolidate() is not implemented yet).
-  6. Peak GPU memory and seconds per step, to size the real run.
+     simulated here, because consolidate() is not implemented yet): every out_proj.weight
+     is projected (24 on the real model), x_proj_* / A_log are skipped (96), heads are left out.
+  6. evaluate() in both modes: class_il (default, all heads joined) and task_il.
+  7. Peak GPU memory and seconds per step, to size the real run.
 
 `--cpu-dry-run` swaps in the tiny CPU stand-in so the script itself can be tested anywhere.
 """
@@ -161,9 +163,13 @@ def main() -> int:
     dt1 = time.time() - t0
     check("task 1: losses finite", all(map(lambda v: v == v and abs(v) != float("inf"), m1.values())), str({k: round(v, 3) for k, v in m1.items()}))
     check("task 1: replay ran (past task sampled)", m1["replay_loss"] > 0.0, f"replay={m1['replay_loss']:.4f}")
-    expected_projected = 1 + len(backbone.model.blocks)  # head weight + one out_proj per block
-    check("task 1: head weight + every out_proj projected", m1["proj_params_projected"] == expected_projected,
-          f"projected={int(m1['proj_params_projected'])} (expected {expected_projected}), skipped={int(m1['proj_params_skipped'])}")
+    n_blocks = len(backbone.model.blocks)
+    expected_projected = n_blocks      # one out_proj.weight per block; heads are not projected
+    expected_skipped = 4 * n_blocks    # x_proj_step / x_proj_B / x_proj_C + A_log per block
+    check("task 1: every out_proj projected, x_proj_* / A_log skipped, heads left out",
+          m1["proj_params_projected"] == expected_projected and m1["proj_params_skipped"] == expected_skipped,
+          f"projected={int(m1['proj_params_projected'])} (expected {expected_projected}), "
+          f"skipped={int(m1['proj_params_skipped'])} (expected {expected_skipped})")
     check("task 1: old head untouched",
           all(torch.equal(v, backbone.heads["0"].state_dict()[k].cpu()) for k, v in head0_before.items()))
     check("task 1: new head trained",
@@ -176,11 +182,13 @@ def main() -> int:
     check("both tasks: trainable backbone parameters moved", len(moved) > 0,
           f"{len(moved)}/{len(train_names)} tensors; GradScaler scale={trainer.scaler.get_scale() if trainer.use_amp else 'off'}")
 
-    acc0, acc1 = trainer.evaluate(0, make_loader(n, bs, seed=2)), trainer.evaluate(1, make_loader(n, bs, seed=3))
-    check("evaluate: accuracies in [0, 1] (random data, so ~0.2 is expected)", 0 <= acc0 <= 1 and 0 <= acc1 <= 1,
-          f"task0={acc0:.2f} task1={acc1:.2f}")
+    for mode, chance in (("class_il", 0.1), ("task_il", 0.2)):
+        acc0 = trainer.evaluate(0, make_loader(n, bs, seed=2), mode=mode)
+        acc1 = trainer.evaluate(1, make_loader(n, bs, seed=3), mode=mode)
+        check(f"evaluate {mode}: accuracies in [0, 1] (random data, so ~{chance} is expected)",
+              0 <= acc0 <= 1 and 0 <= acc1 <= 1, f"task0={acc0:.2f} task1={acc1:.2f}")
 
-    # ── 6. cost ────────────────────────────────────────────────────────
+    # ── 7. cost ────────────────────────────────────────────────────────
     steps = 2 * (cfg.training.epochs_warmup + cfg.training.epochs_joint) * (n // bs)
     print(f"\nbatch={bs} | {steps} train steps in {dt0 + dt1:.1f}s = {(dt0 + dt1) / steps:.2f}s/step"
           + (f" | peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB" if cuda else ""))

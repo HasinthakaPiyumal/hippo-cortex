@@ -10,6 +10,7 @@ the buffer and projector exactly: they play the consolidation phase by calling
 tests/training/test_trainer_consolidation.py and tests/cl/test_consolidation.py.
 """
 import logging
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -23,7 +24,9 @@ from hippocortex.models.backbone import MambaBackbone
 from hippocortex.models.fake_defocus import TinyDefocus
 from hippocortex.models.swr_generator import SWRGenerator
 from hippocortex.training.trainer import Trainer
+from hippocortex.utils.config import load_config
 
+EXPERIMENT_CONFIG = Path(__file__).resolve().parents[2] / "experiments" / "stage1_split_cifar100" / "config.yaml"
 D = 32          # feature width (TinyDefocus embed_dim)
 N_CLS = 5
 DEPTH = 2
@@ -144,31 +147,24 @@ def test_replay_loss_is_zero_without_past_tasks():
 
 # ── projection ───────────────────────────────────────────────────────────────
 
-def test_projection_covers_head_and_out_proj_and_skips_the_rest():
+def test_projection_covers_out_proj_and_skips_the_rest():
     tr = make_trainer()
     run_tasks_until(tr, 1)
     tr._start_task(1)
     backward_one_batch(tr, 1)
 
-    head_w, head_b = tr.backbone.heads["1"].weight, tr.backbone.heads["1"].bias
     out_projs = [b.mixer.out_proj.weight for b in tr.backbone.model.blocks]
     skipped_before = {
         n: p.grad.clone() for n, p in tr.backbone.named_parameters()
-        if p.grad is not None and ("x_proj" in n or "A_log" in n) or n == "heads.1.bias"
+        if p.grad is not None and ("x_proj" in n or "A_log" in n)
     }
-    head_w_before = head_w.grad.clone()
     out_before = [w.grad.clone() for w in out_projs]
 
     n_projected, n_skipped = tr._project_gradients()
 
     U = tr.projector._U
-    assert n_projected == 1 + DEPTH                 # head weight + one out_proj per block
-    assert n_skipped == 1 + DEPTH * 4               # head bias + 3 x_proj + A_log per block
-
-    # last-axis case: (n_classes, d_model) -> G (I - U U^T)
-    assert (head_w.grad @ U).abs().max() < 1e-5
-    assert torch.allclose(head_w.grad, head_w_before - (head_w_before @ U) @ U.T, atol=1e-6)
-    assert not torch.allclose(head_w.grad, head_w_before)
+    assert n_projected == DEPTH                     # one out_proj per block
+    assert n_skipped == DEPTH * 4                   # 3 x_proj + A_log per block
 
     # first-axis case: (d_model, d_inner) -> (I - U U^T) G
     for w, before in zip(out_projs, out_before):
@@ -179,6 +175,40 @@ def test_projection_covers_head_and_out_proj_and_skips_the_rest():
     for n, p in tr.backbone.named_parameters():
         if n in skipped_before:
             assert torch.equal(p.grad, skipped_before[n]), f"{n} was modified"
+
+
+def test_current_head_gradient_is_not_projected():
+    """The head only serves the current task, so projecting it would protect nothing."""
+    tr = make_trainer()
+    run_tasks_until(tr, 1)
+    tr._start_task(1)
+    backward_one_batch(tr, 1)
+    head = tr.backbone.heads["1"]
+    before = {n: p.grad.clone() for n, p in head.named_parameters()}
+    assert (before["weight"] @ tr.projector._U).abs().max() > 1e-3, "test needs a projectable head grad"
+
+    tr._project_gradients()
+
+    for n, p in head.named_parameters():
+        assert torch.equal(p.grad, before[n]), f"head {n} gradient was modified"
+
+
+def test_trainable_parameter_with_last_axis_d_model_is_projected_on_that_axis():
+    """None in De-focus Mamba base; in_proj.weight (2*d_inner, d_model) is unfrozen to test it."""
+    tr = make_trainer()
+    w = tr.backbone.model.blocks[0].mixer.in_proj.weight
+    w.requires_grad_(True)
+    run_tasks_until(tr, 1)
+    tr._start_task(1)                    # optimizer now contains in_proj too
+    backward_one_batch(tr, 1)
+    before = w.grad.clone()
+
+    n_projected, _ = tr._project_gradients()
+
+    U = tr.projector._U
+    assert n_projected == DEPTH + 1
+    assert (w.grad @ U).abs().max() < 1e-5
+    assert torch.allclose(w.grad, before - (before @ U) @ U.T, atol=1e-6)
 
 
 def test_no_projection_before_the_first_consolidation():
@@ -214,8 +244,8 @@ def test_joint_metrics_report_projected_and_skipped_counts():
     tr = make_trainer()
     run_tasks_until(tr, 1)
     metrics = tr.train_task(1, make_loader())
-    assert metrics["proj_params_projected"] == 1 + DEPTH
-    assert metrics["proj_params_skipped"] == 1 + DEPTH * 4
+    assert metrics["proj_params_projected"] == DEPTH
+    assert metrics["proj_params_skipped"] == DEPTH * 4
 
 
 # ── clipping ─────────────────────────────────────────────────────────────────
@@ -266,6 +296,35 @@ def test_head_group_uses_scaled_learning_rate():
     assert lrs == pytest.approx([1e-3, 5e-2])
 
 
+def test_experiment_config_head_lr_matches_mamba_cl():
+    """Mamba-CL trains heads at 2e-4 x 50 = 1e-2; the backbone keeps lr 1e-3."""
+    t = load_config(EXPERIMENT_CONFIG).training
+    assert float(t.lr) == pytest.approx(1e-3)
+    assert float(t.lr) * float(t.head_lr_scale) == pytest.approx(1e-2)
+
+
+# ── mixed precision ──────────────────────────────────────────────────────────
+
+def test_grad_scaler_uses_torch_amp_when_available(monkeypatch):
+    calls = []
+
+    class FakeScaler:
+        def __init__(self, *args, **kwargs):
+            calls.append((args, kwargs))
+
+    monkeypatch.setattr(torch.amp, "GradScaler", FakeScaler, raising=False)
+    tr = make_trainer()
+    assert isinstance(tr.scaler, FakeScaler)
+    assert calls == [(("cuda",), {"enabled": False})]
+
+
+def test_grad_scaler_falls_back_on_torch_without_torch_amp_grad_scaler(monkeypatch):
+    monkeypatch.delattr(torch.amp, "GradScaler", raising=False)
+    tr = make_trainer()
+    assert isinstance(tr.scaler, torch.cuda.amp.GradScaler)
+    assert not tr.scaler.is_enabled()
+
+
 def test_new_head_trains_and_old_head_is_untouched():
     tr = make_trainer()
     tr.train_task(0, make_loader())
@@ -309,20 +368,64 @@ def test_a_task_can_be_trained_again():
 
 # ── evaluation ───────────────────────────────────────────────────────────────
 
-def test_evaluate_uses_the_head_of_the_requested_task():
-    tr = make_trainer()
-    run_tasks_until(tr, 2)
+def fix_head_outputs(tr: Trainer, winners: dict[int, tuple[int, float]]) -> None:
+    """Make head t always output ``value`` for local class ``cls`` and 0 elsewhere."""
     with torch.no_grad():
-        for tid, cls in ((0, 2), (1, 4)):
+        for tid, (cls, value) in winners.items():
             head = tr.backbone.heads[str(tid)]
             head.weight.zero_()
             head.bias.zero_()
-            head.bias[cls] = 10.0
+            head.bias[cls] = value
+
+
+def test_task_il_evaluate_uses_the_head_of_the_requested_task():
+    tr = make_trainer()
+    run_tasks_until(tr, 2)
+    fix_head_outputs(tr, {0: (2, 10.0), 1: (4, 10.0)})
 
     only_class_2 = make_loader(labels=2)
-    assert tr.evaluate(0, only_class_2) == 1.0
-    assert tr.evaluate(1, only_class_2) == 0.0
+    assert tr.evaluate(0, only_class_2, mode="task_il") == 1.0
+    assert tr.evaluate(1, only_class_2, mode="task_il") == 0.0
+    assert tr.evaluate(1, make_loader(labels=4), mode="task_il") == 1.0
+
+
+def test_class_il_is_the_default_and_predicts_over_all_seen_classes():
+    """Heads are joined; head 1's class 4 (global 5 + 4 = 9) outscores head 0's class 2."""
+    tr = make_trainer()
+    run_tasks_until(tr, 2)
+    fix_head_outputs(tr, {0: (2, 10.0), 1: (4, 20.0)})
+
+    # task 1, local label 4 -> global label 9 = the joined argmax
     assert tr.evaluate(1, make_loader(labels=4)) == 1.0
+    # task 0, label 2: its own head is right, but head 1 wins across all classes
+    assert tr.evaluate(0, make_loader(labels=2), mode="task_il") == 1.0
+    assert tr.evaluate(0, make_loader(labels=2)) == 0.0
+    assert tr.evaluate(0, make_loader(labels=2), mode="class_il") == 0.0
+
+
+def test_class_il_maps_local_labels_to_global_indices():
+    """Head 0 wins with its class 4; a task-1 sample with local label 4 is global 9, so wrong."""
+    tr = make_trainer()
+    run_tasks_until(tr, 2)
+    fix_head_outputs(tr, {0: (4, 20.0), 1: (4, 10.0)})
+
+    assert tr.evaluate(0, make_loader(labels=4)) == 1.0
+    assert tr.evaluate(1, make_loader(labels=4)) == 0.0
+
+
+def test_eval_mode_comes_from_the_config_and_is_validated():
+    cfg = make_cfg()
+    cfg.eval = {"mode": "task_il"}
+    backbone = MambaBackbone(model=TinyDefocus(embed_dim=D, depth=DEPTH), image_size=64)
+    swr = SWRGenerator(hidden_dim=D, latent_dim=8, n_tasks=4)
+    tr = Trainer(backbone, swr, NullSpaceProjector(rank_budget=16), StatsBuffer(), cfg)
+    assert tr.eval_mode == "task_il"
+
+    cfg.eval.mode = "class-incremental"
+    with pytest.raises(ValueError, match="eval.mode"):
+        Trainer(backbone, swr, NullSpaceProjector(rank_budget=16), StatsBuffer(), cfg)
+    with pytest.raises(ValueError, match="mode"):
+        tr.evaluate(0, make_loader(), mode="both")
 
 
 def test_evaluate_restores_training_mode():

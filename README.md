@@ -66,12 +66,12 @@ Task N ──▶ Mamba backbone ──▶ loss & update ◀── null-space pro
 
 **Training loop per new task:**
 1. **Warmup** — supervised CE on the current task only; no replay, no projection.
-2. **Joint** — CE on current task mixed with synthetic `ĥ_past` from the SWR generator; all gradients projected through `P` before touching any weight.
+2. **Joint** — CE on current task mixed with synthetic `ĥ_past` from the SWR generator; backbone gradients projected through `P` before touching any weight (task heads are not projected; see [docs/architecture.md](docs/architecture.md), decision 8).
 3. **Consolidation** — update the stats buffer with the new task's `(µ, σ²)` and extend `U` with new important feature directions.
 
 **Benchmarks:** Split-CIFAR100 (20 tasks × 5 classes), ImageNet-R  
 **Baselines:** Naive fine-tuning, EWC, DGR, Mamba-CL, Inf-SSM  
-**Metrics:** Average accuracy, forgetting rate, memory footprint (MB) vs. task index
+**Metrics:** Average accuracy, forgetting rate, memory footprint (MB) vs. task index. Accuracy is class-incremental, as in Mamba-CL: the heads of all tasks seen so far are joined and the prediction is the argmax over every seen class (`eval.mode: class_il`).
 
 ### Stage 2 — Embodied deployment (Months 4–6)
 
@@ -361,7 +361,7 @@ python experiments/stage1_split_cifar100/run.py \
 python experiments/stage1_split_cifar100/run.py
 ```
 
-Override any config value on the command line (Hydra syntax):
+Override any config value on the command line (`key.path=value`; an unknown key is an error, so a typo cannot silently do nothing):
 
 ```bash
 python experiments/stage1_split_cifar100/run.py seed=123

@@ -1,5 +1,4 @@
 import logging
-import wandb
 from omegaconf import DictConfig, OmegaConf
 
 
@@ -15,9 +14,6 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def init_wandb(cfg: DictConfig, run_name: str | None = None) -> None:
-    """Initialise a wandb run from config. No-op if wandb is disabled."""
-    wandb.init(
-        project=cfg.logging.wandb_project,
-        name=run_name or cfg.logging.run_name,
-        config=OmegaConf.to_container(cfg, resolve=True),
-    )
+    """Deprecated: use hippocortex.utils.wandb_logger.init(cfg) instead."""
+    from hippocortex.utils import wandb_logger
+    wandb_logger.init(cfg)
