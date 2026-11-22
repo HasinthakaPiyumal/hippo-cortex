@@ -94,9 +94,9 @@ training:
   weight_decay: 1.0e-4         # L2 regularisation via AdamW decoupling
   betas: [0.9, 0.999]          # AdamW momentum terms (PyTorch defaults)
 
-  # Task heads train at lr × head_lr_scale (Mamba-CL: --lr_scale 50 on 'head').
-  # Note Mamba-CL's base lr is 2e-4 (head 1e-2); here 1e-3 × 50 = 5e-2.
-  head_lr_scale: 50.0
+  # Task heads train at lr × head_lr_scale. 1e-3 × 10 = 1e-2, the same head lr as
+  # Mamba-CL (base lr 2e-4 × --lr_scale 50). The backbone lr (1e-3) is unchanged.
+  head_lr_scale: 10.0
 
   # Mixed precision, CUDA only: fp16 autocast + GradScaler (Mamba-CL --use_amp).
   use_amp: true
@@ -123,6 +123,9 @@ training:
 # Evaluation
 # -----------------------------------------------------------------------------
 eval:
+  mode: class_il               # class_il: heads of all seen tasks joined, argmax over every
+                               #   seen class (Mamba-CL's metric; use this for comparisons)
+                               # task_il:  each task scored with its own head (task id given)
   eval_after_each_task: true   # compute acc on all seen tasks after each task
   eval_batch_size: 256         # larger batch is fine — no gradients
 

@@ -15,6 +15,9 @@ Interface (unchanged for the trainer, plus an optional ``task_id``):
 - extract_hidden(x)         -> hidden only. Same extraction point as forward().
 - set_task_head(n_classes)  -> adds a head for a new task and returns it. Old heads
                                are kept (and frozen), like Mamba-CL's --seperate_head.
+- joined_logits(hidden)     -> every head's logits concatenated in task order, i.e. one
+                               head over all classes seen so far. With class_offset(t)
+                               this is Mamba-CL's class-incremental evaluation.
 
 Training scope matches Mamba-CL's --training_string ('head', 'x_proj',
 'out_proj.weight', 'A_log'): everything else is frozen.
@@ -206,6 +209,29 @@ class MambaBackbone(nn.Module):
 
     def head_parameters(self, task_id: int | None = None) -> list[nn.Parameter]:
         return list(self._head(task_id).parameters())
+
+    def class_offset(self, task_id: int) -> int:
+        """
+        Index of task ``task_id``'s first class in joined_logits(): the number of classes
+        of all earlier heads. Global label = class_offset(task_id) + local label.
+        """
+        self._head(task_id)  # raises for a task with no head
+        return sum(self.heads[str(t)].out_features for t in range(task_id))
+
+    def joined_logits(self, hidden: Tensor) -> Tensor:
+        """
+        Logits of every head, concatenated in task order: one head over all classes seen
+        so far, as Mamba-CL builds for evaluation (modify_head with training=False).
+
+        Args:
+            hidden: (B, feature_dim), from extract_hidden().
+
+        Returns:
+            (B, total number of classes over all heads)
+        """
+        if len(self.heads) == 0:
+            raise RuntimeError("No task head yet; call set_task_head() first.")
+        return torch.cat([self.heads[str(t)](hidden) for t in range(len(self.heads))], dim=-1)
 
     def backbone_parameters(self) -> list[nn.Parameter]:
         """Trainable backbone parameters (x_proj*, out_proj.weight, A_log), excluding heads."""

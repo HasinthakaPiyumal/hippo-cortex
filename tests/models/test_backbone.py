@@ -153,6 +153,34 @@ def test_forward_without_head_and_with_unknown_task():
         bb(images(1), task_id=3)
 
 
+def test_joined_logits_concatenate_every_head_in_task_order():
+    """One head over all seen classes, as Mamba-CL joins heads for evaluation."""
+    bb = make_backbone().eval()
+    for n_classes in (5, 3, 4):
+        bb.set_task_head(n_classes)
+    with torch.no_grad():
+        hidden = bb.extract_hidden(images(2))
+        joined = bb.joined_logits(hidden)
+    assert joined.shape == (2, 12)
+    assert torch.equal(joined[:, 0:5], bb.heads["0"](hidden))
+    assert torch.equal(joined[:, 5:8], bb.heads["1"](hidden))
+    assert torch.equal(joined[:, 8:12], bb.heads["2"](hidden))
+
+
+def test_class_offset_is_the_number_of_earlier_classes():
+    bb = make_backbone()
+    for n_classes in (5, 3, 4):
+        bb.set_task_head(n_classes)
+    assert [bb.class_offset(t) for t in range(3)] == [0, 5, 8]
+    with pytest.raises(KeyError):
+        bb.class_offset(3)
+
+
+def test_joined_logits_without_head():
+    with pytest.raises(RuntimeError, match="set_task_head"):
+        make_backbone().joined_logits(torch.zeros(1, D))
+
+
 def test_only_current_head_is_trainable():
     bb = make_backbone()
     bb.set_task_head(5)
