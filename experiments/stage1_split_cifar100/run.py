@@ -27,11 +27,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import wandb
 
 from hippocortex.utils.seed import set_seed
 from hippocortex.utils.config import load_config
-from hippocortex.utils.logging import init_wandb, get_logger
+from hippocortex.utils.logging import get_logger
+from hippocortex.utils import wandb_logger
 from hippocortex.utils.metrics import ContinualMetrics
 from hippocortex.utils.memory_tracker import MemoryTracker
 from hippocortex.models.backbone import MambaBackbone
@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> None:
     if not 1 <= n_tasks <= N_TASKS:
         raise ValueError(f"dataset.n_tasks must be in [1, {N_TASKS}], got {n_tasks}")
     set_seed(cfg.seed)
-    init_wandb(cfg, run_name=f"hippocortex_splitcifar100_{cfg.seed}")
+    wandb_logger.init(cfg)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     _log.info("Using device: %s", device)
@@ -94,14 +94,30 @@ def main(argv: list[str] | None = None) -> None:
         train_loader = get_task_loaders(task_id, "train", cfg.dataset.root, cfg.training.batch_size)
         metrics = trainer.train_task(task_id, train_loader)
         tracker.task_end(task_id)
-        wandb.log({"task": task_id, **metrics})
+
+        mem_snap = tracker.task_records[task_id].end_snapshot
+        mem_log = {
+            "memory/gpu_allocated_mb": mem_snap.gpu_allocated_mb if mem_snap else 0.0,
+            "memory/cpu_rss_mb": mem_snap.cpu_rss_mb if mem_snap else 0.0,
+            "memory/swr_buffer_mb": mem_snap.swr_buffer_mb if mem_snap else 0.0,
+        }
+
+        wandb_logger.log({"task": task_id, **metrics, **mem_log})
 
         # Evaluate on all tasks seen so far
+        accs = {}
         for eval_id in range(task_id + 1):
             test_loader = get_task_loaders(eval_id, "test", cfg.dataset.root, cfg.training.batch_size)
             acc = trainer.evaluate(eval_id, test_loader)
             cl_metrics.record(task_id, eval_id, acc)
-            wandb.log({f"acc/task_{eval_id}_after_{task_id}": acc})
+            accs[f"acc/task_{eval_id}"] = acc
+
+        cl_so_far = cl_metrics.summary()
+        wandb_logger.log({
+            **accs,
+            "AA": cl_so_far["final_aa"],
+            "FM": cl_so_far["final_fm"],
+        })
 
     tracker.stop()
 
@@ -124,8 +140,8 @@ def main(argv: list[str] | None = None) -> None:
     (save_dir / "summary.json").write_text(json.dumps(summary, indent=2))
 
     _log.info("Done. AA=%.4f  AIA=%.4f  FM=%.4f", summary["AA"], summary["AIA"], summary["FM"])
-    wandb.log(summary)
-    wandb.finish()
+    wandb_logger.log(summary)
+    wandb_logger.finish()
 
 
 if __name__ == "__main__":

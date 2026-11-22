@@ -135,15 +135,43 @@ Accuracy is **class-incremental** by default (`eval.mode: class_il`), matching M
 
 ## Baseline Results
 
-*(Filled by Thagya after running `experiments/stage1_split_cifar100/eval_baseline.py`)*
+Source of truth: W&B entity `hasinthakapiyumal-uok` (Kaggle notebooks are saved without outputs).
+Regenerate the CSV (`results/stage1_split_cifar100/baselines.csv`, gitignored) with:
 
-| Method | Dataset | AA | AF | BWT | Memory (MB) | Commit / Date |
-|--------|---------|----|----|-----|-------------|---------------|
-| Mamba-CL | Split-CIFAR100 | — | — | — | — | — |
-| Inf-SSM | Split-CIFAR100 | — | — | — | — | — |
-| EWC | Split-CIFAR100 | — | — | — | — | — |
-| DGR | Split-CIFAR100 | — | — | — | — | — |
-| **HippoCortex** | Split-CIFAR100 | — | — | — | — | — |
+```bash
+python experiments/stage1_split_cifar100/eval_baseline.py   --wandb_run hasinthakapiyumal-uok/seq-finetune-baseline/aab59762ef36 --method seq   --wandb_run hasinthakapiyumal-uok/inf-ssm-baseline/d591d88c21e6 --method inf_ssm   --wandb_run hasinthakapiyumal-uok/mamba-cl-baseline/3388e092e0b1 --method mamba_cl_shared_head   --wandb_run hasinthakapiyumal-uok/mamba-cl-baseline/3427efba80b5 --method mamba_cl
+```
+
+### Main comparison: Inf-SSM protocol (Split-CIFAR100, 10 tasks × 10 classes)
+
+Vim-small, one shared 100-class head, authors' task-0 checkpoint, 40 epochs/task, batch 128, seed 0.
+All three run from `baselines/inf-ssm` (`--cl_method seq | reg | mamba_cl`).
+
+| Method | AA ↑ | AIA ↑ | FM ↓ | TIL ↑ | W&B run | Date |
+|--------|------|-------|------|-------|---------|------|
+| Sequential fine-tune (lower bound) | 21.56 | 48.89 | 39.28 | 62.76 | `seq-finetune-baseline/aab59762ef36` | 2026-11-22 |
+| Inf-SSM (λ = 3×10⁴) | 28.42 | 55.35 | 24.83 | 70.99 | `inf-ssm-baseline/d591d88c21e6` | 2026-10-22 |
+| Mamba-CL (η = 0.95, `--optim mamba_cl`, head wd 0) | 51.52 | 59.43 | 48.62 | 94.94 | `mamba-cl-baseline/3388e092e0b1` | 2026-11-10 |
+| **HippoCortex** | — | — | — | — | — | — |
+
+- Inf-SSM paper (Table 2, mean of seeds 0/10/100): AA 26.53 ± 3.10, AIA 54.24 ± 1.87, FM 24.00 ± 1.80. Ours is within one std.
+- Inf-SSM paper Seq row: AA 20.58, AIA 51.37, FM 71.49. Our AA/AIA are close; our FM is much lower — check the FM definition before quoting it.
+- Mamba-CL forgets in the shared head, not the features: old tasks keep ~95% TIL.
+- Still to run: seeds 10 and 100 for all three; ImageNet-R.
+
+### Mamba-CL, its own protocol (not comparable with the table above)
+
+Separate 10-class head per task (joined at test), `baselines/mamba-cl`, Vim-small, task-0 start `inf_ssm_task0`, seed 0:
+AA 79.52, FM 8.53 (`mamba-cl-baseline/3427efba80b5`, 2026-11-01).
+Older runs on other backbones: Defocus-Mamba large (21K) 10×10 AA 90.16 / FM 2.18 (2026-10).
+
+--------|----------|-------|----|----|--------|
+| Mamba-CL | large (21K) | 10×10 | **90.16%** | **2.18%** | reproduced run (Hasinthaka, 2026-10) |
+| Mamba-CL | base (1K)   | 20×5  | *(pending, Kaggle run)* | *(pending)* | — |
+| Inf-SSM  | base (1K)   | 20×5  | *(pending, Hasinthaka)* | *(pending)* | — |
+| EWC | — | Split-CIFAR100 | — | — | — |
+| DGR | — | Split-CIFAR100 | — | — | — |
+| **HippoCortex** | — | Split-CIFAR100 | — | — | — |
 
 ---
 
