@@ -25,8 +25,17 @@ W&B API key:
 Output CSV columns:
     method, n_tasks, AA, AIA, FM, source, eval_date
 
-NOTE: BWT requires the per-task accuracy matrix, which is not logged by default.
-Tell Hasinthaka to add a matrix-print line to train_eval.py if BWT is needed.
+Main comparison table (Paper 1):
+    python experiments/stage1_split_cifar100/eval_baseline.py --table \\
+        --wandb_run hasinthakapiyumal-uok/inf-ssm-baseline/d591d88c21e6 --method inf_ssm \\
+        --wandb_run hasinthakapiyumal-uok/mamba-cl-baseline/3388e092e0b1 --method mamba_cl_shared_head
+Writes results/stage1_split_cifar100/main_table.md and .csv with
+AA, AIA, FM, TIL and BWT for each method, plus acc_curve.png.
+Add HippoCortex with one more --wandb_run/--method pair; no code change needed.
+
+NOTE on BWT: only available when the run logs the per-task accuracy matrix as
+`test/class_<i>_acc` columns (inf-ssm-protocol runs: seq, inf_ssm, mamba_cl_shared_head).
+Mamba-CL's own protocol does not log this matrix to W&B, so BWT is None for --method mamba_cl.
 """
 from __future__ import annotations
 
@@ -59,6 +68,7 @@ _WANDB_KEY_MAP: Dict[str, Dict[str, str]] = {
         "AA": "AA",
         "AIA": "AIA",
         "FM": "FM",
+        "TIL_AA": "TIL",
     },
 }
 
@@ -68,9 +78,14 @@ _WANDB_FALLBACK_KEYS = {
     "AA": "AA",
     "AIA": "AIA",
     "FM": "FM",
+    "TIL_AA": "TIL",
     "class_inc_last_acc": "AA",
     "class_inc_last_forg": "FM",
 }
+
+# Per-task accuracy matrix, logged only by inf-ssm-protocol runs (seq, inf_ssm,
+# mamba_cl_shared_head): row at task t holds test/class_<i>_acc for i in 0..t.
+_CLASS_ACC_RE = re.compile(r"^test/class_(\d+)_acc$")
 
 # ---------------------------------------------------------------------------
 # Log-file parser (kept as fallback)
@@ -101,7 +116,8 @@ def extract_final_metrics_from_log(
     if not records:
         raise ValueError("No task-result lines found in the log.")
     task_id, aa_pct, fm_pct = records[-1]
-    return {"AA": aa_pct, "AIA": None, "FM": fm_pct, "n_tasks": task_id, "records": records}
+    return {"AA": aa_pct, "AIA": None, "FM": fm_pct, "TIL": None, "BWT": None,
+            "n_tasks": task_id, "records": records}
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +151,7 @@ def fetch_wandb_run(run_path: str, method: str) -> Dict[str, object]:
     # that miss the method's keys are read with the fallback map instead.
     task_key = "task"
     rows_by_task: Dict[int, Dict[str, float]] = {}
+    class_accs_by_task: Dict[int, Dict[int, float]] = {}
 
     def _map_row(row: dict, mapping: Dict[str, str]) -> Dict[str, float]:
         mapped = {}
@@ -161,6 +178,15 @@ def fetch_wandb_run(run_path: str, method: str) -> Dict[str, object]:
         if "AA" in mapped:
             rows_by_task[task_id] = mapped  # last row for this task wins
 
+        # Per-task accuracy matrix, if this run logs it (inf-ssm-protocol runs).
+        class_row = {}
+        for k, v in row.items():
+            m = _CLASS_ACC_RE.match(k)
+            if m is not None and v is not None:
+                class_row[int(m.group(1))] = float(v)
+        if class_row:
+            class_accs_by_task[task_id] = class_row  # last row wins, same as above
+
     if not rows_by_task:
         raise ValueError(
             f"No per-task rows with key 'AA' found in W&B run {run_path}.\n"
@@ -177,9 +203,36 @@ def fetch_wandb_run(run_path: str, method: str) -> Dict[str, object]:
         "AA": last["AA"],
         "AIA": last.get("AIA"),
         "FM": last.get("FM"),
+        "TIL": last.get("TIL"),
+        "BWT": compute_bwt(class_accs_by_task),
         "n_tasks": len(sorted_tasks),
         "records": records,
     }
+
+
+def compute_bwt(class_accs_by_task: Dict[int, Dict[int, float]]) -> Optional[float]:
+    """
+    Backward Transfer, in percentage points: mean over tasks i (all but the
+    last) of (accuracy on task i after the final task) - (accuracy on task i
+    right after training task i).
+
+    class_accs_by_task[t][i] = fraction accuracy on task i after training
+    task t (i <= t), as logged under test/class_<i>_acc. Returns None if
+    fewer than 2 tasks have a recorded matrix row.
+    """
+    if len(class_accs_by_task) < 2:
+        return None
+    sorted_tasks = sorted(class_accs_by_task.keys())
+    last_row = class_accs_by_task[sorted_tasks[-1]]
+    diffs = []
+    for i in sorted_tasks[:-1]:
+        diag = class_accs_by_task.get(i, {}).get(i)
+        final = last_row.get(i)
+        if diag is not None and final is not None:
+            diffs.append(final - diag)
+    if not diffs:
+        return None
+    return (sum(diffs) / len(diffs)) * 100.0
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +256,43 @@ def write_csv(rows: List[dict], csv_path: Path) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(existing + rows)
+
+
+_PROTOCOL_FOOTNOTE = (
+    "Protocol note: Mamba-CL trains about 10M parameters with null-space "
+    "projection, while Inf-SSM trains all weights with a shared 100-way head."
+)
+
+
+def write_main_table(table_rows: List[dict], out_dir: Path) -> None:
+    """
+    Write results/stage1_split_cifar100/main_table.{md,csv} — the Paper 1
+    comparison table: one row per method, with AA, AIA, FM, TIL and BWT,
+    traceable back to its W&B run.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fieldnames = ["method", "AA", "AIA", "FM", "TIL", "BWT", "wandb_run", "eval_date"]
+
+    csv_path = out_dir / "main_table.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(table_rows)
+    print(f"Saved table → {csv_path}")
+
+    md_path = out_dir / "main_table.md"
+    header = "| Method | AA | AIA | FM | TIL | BWT | W&B run | Date |"
+    sep = "|---|---|---|---|---|---|---|---|"
+    lines = [header, sep]
+    for row in table_rows:
+        lines.append(
+            f"| {row['method']} | {row['AA']} | {row['AIA']} | {row['FM']} | "
+            f"{row['TIL']} | {row['BWT']} | `{row['wandb_run']}` | {row['eval_date']} |"
+        )
+    lines.append("")
+    lines.append(_PROTOCOL_FOOTNOTE)
+    md_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"Saved table → {md_path}")
 
 
 def plot_acc_curves(
@@ -251,6 +341,10 @@ def main() -> None:
         "--out_dir", type=Path, default=_SAVE_DIR,
         help="Output directory for baselines.csv and acc_curve.png",
     )
+    parser.add_argument(
+        "--table", action="store_true",
+        help="Also write main_table.md and main_table.csv (AA, AIA, FM, TIL, BWT per method)",
+    )
     args = parser.parse_args()
 
     sources = (args.wandb_runs or []) + (args.logs or [])
@@ -268,6 +362,7 @@ def main() -> None:
     plot_path = args.out_dir / "acc_curve.png"
     rows: List[dict] = []
     method_records = []
+    table_rows: List[dict] = []
 
     for run_path, method in wandb_pairs:
         print(f"Fetching W&B run {run_path} ({method}) …")
@@ -276,7 +371,7 @@ def main() -> None:
         except Exception as e:
             print(f"  ERROR: {e}")
             continue
-        _print_and_collect(method, result, run_path, "wandb", rows, method_records)
+        _print_and_collect(method, result, run_path, "wandb", rows, method_records, table_rows)
 
     for log_str, method in log_pairs:
         log_path = Path(log_str)
@@ -288,23 +383,29 @@ def main() -> None:
             print(f"WARNING: no task-result lines in {log_path} — skipping.")
             continue
         result = extract_final_metrics_from_log(records)
-        _print_and_collect(method, result, str(log_path), "log", rows, method_records)
+        _print_and_collect(method, result, str(log_path), "log", rows, method_records, table_rows)
 
     if rows:
         write_csv(rows, csv_path)
         print(f"Saved CSV  → {csv_path}")
     if method_records:
         plot_acc_curves(method_records, plot_path)
+    if args.table and table_rows:
+        write_main_table(table_rows, args.out_dir)
 
 
-def _print_and_collect(method, result, source, source_type, rows, method_records):
+def _print_and_collect(method, result, source, source_type, rows, method_records, table_rows):
     aa = result["AA"]
     aia = result.get("AIA")
     fm = result.get("FM")
+    til = result.get("TIL")
+    bwt = result.get("BWT")
     n = result["n_tasks"]
     aia_str = f"{aia:.2f}" if aia is not None else ""
     fm_str = f"{fm:.2f}" if fm is not None else ""
-    print(f"  {method}: AA={aa:.2f}%  AIA={aia_str}  FM={fm_str}  n_tasks={n}  [{source_type}]")
+    til_str = f"{til:.2f}" if til is not None else ""
+    bwt_str = f"{bwt:.2f}" if bwt is not None else ""
+    print(f"  {method}: AA={aa:.2f}%  AIA={aia_str}  FM={fm_str}  TIL={til_str}  BWT={bwt_str}  n_tasks={n}  [{source_type}]")
     rows.append({
         "method": method,
         "n_tasks": n,
@@ -315,6 +416,16 @@ def _print_and_collect(method, result, source, source_type, rows, method_records
         "eval_date": str(date.today()),
     })
     method_records.append((method, result["records"]))
+    table_rows.append({
+        "method": method,
+        "AA": f"{aa:.2f}",
+        "AIA": aia_str,
+        "FM": fm_str,
+        "TIL": til_str,
+        "BWT": bwt_str,
+        "wandb_run": source if source_type == "wandb" else "",
+        "eval_date": str(date.today()),
+    })
 
 
 if __name__ == "__main__":
