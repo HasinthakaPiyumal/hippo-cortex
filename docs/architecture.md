@@ -128,7 +128,7 @@ Accuracy is **class-incremental** by default (`eval.mode: class_il`), matching M
 
 The protocol follows the shared-head baselines: Split-CIFAR100 **10×10 in natural class order** with ImageNet normalisation, **one shared 100-way head** (`head_mode: shared`, loaded from the task-0 checkpoint; CE over all classes seen so far, head weight decay 0), task 0 not retrained (`training.train_first_task: false`), Adam-style lr 2e-4 with the head at ×50, seed 0. `head_mode: per_task` and `arch: defocus_base` keep the older Mamba-CL-own-protocol setup (20×5, one head per task, 768-d).
 
-Still different from the baselines: CIFAR images are upsampled from 32×32 with crop + flip only (the baselines use 224 RandAugment, mixup/cutmix and label smoothing), batch 64 (baselines 128), and 5 + 10 epochs per task (baselines 40).
+Still different from the baselines by default: CIFAR images are upsampled from 32×32 with crop + flip only. `dataset.augment: inf_ssm` uses the baselines' own transforms (224 RandAugment, colour jitter, random erasing; ImageNet stats for train and CIFAR stats for eval, as in `baselines/inf-ssm/cl_datasets.py`). Mixup/cutmix and label smoothing are not implemented. Batch 64 (baselines 128), and 5 + 10 epochs per task (baselines 40).
 
 **Known limitations of the Phase 2 loop** (open design questions — see the `trainer.py` module docstring):
 - `NullSpaceProjector` holds a single basis of the feature width (384), so only `out_proj.weight` (first axis) can be projected. `x_proj_*`, `A_log` and `A_b_log` have no such axis; they are skipped (logged once, counted in the metrics) and train **unprotected**. Mamba-CL builds a separate basis per parameter from that layer's input activations.
