@@ -11,7 +11,7 @@ EXPERIMENT_CONFIG = Path(__file__).resolve().parents[2] / "experiments" / "stage
 
 def test_without_overrides_the_file_is_loaded_as_is():
     cfg = load_config(EXPERIMENT_CONFIG)
-    assert cfg.dataset.n_tasks == 20
+    assert cfg.dataset.n_tasks == 10
     assert load_config(EXPERIMENT_CONFIG, overrides=[]) == cfg
 
 

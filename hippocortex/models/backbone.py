@@ -1,34 +1,44 @@
 """
-MambaBackbone — De-focus Mamba base encoder + one classification head per task.
+MambaBackbone — Vim-small (default) or De-focus Mamba base encoder + classification head(s).
 
 OWNER: Praveen Dedigama
 
-This is the same network the Mamba-CL baseline runs (baselines/mamba-cl, config
-defocus_mamba_base.yaml, checkpoint defocus_mamba_base_cls.pth), so HippoCortex
-and the baseline are directly comparable.
+arch="vim_small" (default) is the network of both baselines (Inf-SSM and Mamba-CL under the
+Inf-SSM protocol): baselines/mamba-cl/utils/vim_mamba.py, the same weights and computation as
+baselines/inf-ssm/mamba_vim.py with x_proj split for the null-space parameters. Weights come
+from the authors' task-0 checkpoint (``checkpoint_path="hf"``: HF repo ileening0022/Inf-SSM,
+<hf_dir>/task_0_checkpoint_seed_<seed>.pth), so HippoCortex starts where the baselines start.
+arch="defocus_base" is the older De-focus Mamba base network of Mamba-CL's own protocol.
 
-Interface (unchanged for the trainer, plus an optional ``task_id``):
-- forward(x, task_id=None)  -> (logits, hidden)
-      x:      images (B, 3, H, W); resized to ``image_size`` (224) inside.
-      hidden: model.encode_image(x, pre_logits=True), shape (B, feature_dim = 768).
-      logits: head of ``task_id`` (default: the most recently added head).
-- extract_hidden(x)         -> hidden only. Same extraction point as forward().
-- set_task_head(n_classes)  -> adds a head for a new task and returns it. Old heads
-                               are kept (and frozen), like Mamba-CL's --seperate_head.
-- joined_logits(hidden)     -> every head's logits concatenated in task order, i.e. one
-                               head over all classes seen so far. With class_offset(t)
-                               this is Mamba-CL's class-incremental evaluation.
+Heads (``head_mode``):
+- "shared":   one Linear over all ``n_classes_total`` classes, as in the Inf-SSM protocol. With
+              the task-0 checkpoint the head comes from the checkpoint (it already knows task 0).
+              forward(x, task_id) returns the logits of every class seen up to ``task_id``;
+              labels must be shifted by label_offset(task_id) to global indices.
+- "per_task": one head per task, earlier heads frozen (Mamba-CL --seperate_head). forward()
+              returns the head of ``task_id`` only; label_offset() is 0.
 
-Training scope matches Mamba-CL's --training_string ('head', 'x_proj',
-'out_proj.weight', 'A_log'): everything else is frozen.
+Interface (used by the trainer):
+- forward(x, task_id=None)  -> (logits, hidden). x: (B, 3, H, W), resized to ``image_size``.
+                               hidden: model.encode_image(x, pre_logits=True), (B, feature_dim):
+                               384 for Vim-small, 768 for De-focus base.
+- extract_hidden(x)         -> hidden only.
+- set_task_head(n_classes)  -> registers task ``task_id`` and returns the head(s) to train.
+- label_offset(task_id)     -> add to the loader's local labels for forward()'s logits.
+- task_logits(hidden, t)    -> task t's own classes only (task-incremental eval).
+- joined_logits(hidden)     -> every class seen so far, in task order; with class_offset(t)
+                               this is the class-incremental evaluation.
 
-Loading order matters and mirrors baselines/mamba-cl/train_eval.py:
-  build_model -> load_state_dict(strict=False) -> report keys -> reload_params().
-reload_params() splits ``x_proj`` into x_proj_step / x_proj_B / x_proj_C, which the
-forward pass uses, so it must run after the checkpoint (which stores ``x_proj``) is loaded.
+Training scope matches Mamba-CL's --training_string: x_proj*, out_proj.weight, A_log and, for
+Vim's backward direction, A_b_log (plus the head). Everything else is frozen.
 
-The real model needs mamba-ssm 1.2.2 + causal-conv1d (CUDA). For CPU tests pass a
-stand-in via ``MambaBackbone(model=...)`` (see hippocortex/models/fake_defocus.py).
+Loading order mirrors the baselines: build -> load checkpoint (strict=False) -> report keys ->
+reload_params(). reload_params() splits ``x_proj`` into x_proj_step / x_proj_B / x_proj_C, which
+the forward pass uses, so it must run after the checkpoint (which stores ``x_proj``) is loaded.
+
+Vim-small runs on CPU through pure-PyTorch fallbacks (slow, fine for tiny test models). De-focus
+base needs mamba-ssm 1.2.2 + causal-conv1d (CUDA); for CPU tests pass a stand-in via
+``MambaBackbone(model=...)`` (see hippocortex/models/fake_defocus.py).
 """
 from __future__ import annotations
 
@@ -53,49 +63,84 @@ CHECKPOINT_URL = (
     "defocus_mamba_base_cls.pth"
 )
 
-# Mamba-CL's --training_string minus 'head': the per-task heads are always trainable
-# (current task only), so only the backbone patterns are listed here.
-BACKBONE_TRAINABLE_PATTERNS = ("x_proj", "out_proj.weight", "A_log")
+TASK0_HF_REPO = "ileening0022/Inf-SSM"  # <hf_dir>/task_0_checkpoint_seed_<seed>.pth (seed 0 only)
 
-# If any of these are missing after load_state_dict the pretrained weights did not load.
-REQUIRED_KEY_PREFIXES = ("blocks.", "patch_embed.", "norm.", "cls_token")
+ARCHS = ("vim_small", "defocus_base")
+HEAD_MODES = ("shared", "per_task")
+
+# Mamba-CL's --training_string minus 'head' (heads are handled separately). A_b_log is Vim's
+# backward-direction A, which the plain 'A_log' pattern does not match.
+BACKBONE_TRAINABLE_PATTERNS = ("x_proj", "out_proj.weight", "A_log", "A_b_log")
+
+# If any of these are missing after loading, the pretrained weights did not load.
+REQUIRED_KEY_PREFIXES = {
+    "defocus_base": ("blocks.", "patch_embed.", "norm.", "cls_token"),
+    "vim_small": ("layers.", "patch_embed.", "norm_f.", "cls_token", "pos_embed"),
+}
 
 
-def _load_mamba_cl_config_module() -> ModuleType:
-    """Import baselines/mamba-cl/utils as a private package and return its ``config`` module."""
-    cfg_name = f"{_PKG}.config"
-    if cfg_name in sys.modules:
-        return sys.modules[cfg_name]
+def _load_mamba_cl_module(name: str) -> ModuleType:
+    """Import baselines/mamba-cl/utils as a private package and return its ``name`` module."""
+    full_name = f"{_PKG}.{name}"
+    if full_name in sys.modules:
+        return sys.modules[full_name]
 
-    init = _MAMBA_CL_UTILS / "__init__.py"
-    if not init.is_file():
-        raise FileNotFoundError(
-            f"Mamba-CL model code not found at {_MAMBA_CL_UTILS}. "
-            "MambaBackbone imports it from the repository checkout (baselines/mamba-cl)."
+    if _PKG not in sys.modules:
+        init = _MAMBA_CL_UTILS / "__init__.py"
+        if not init.is_file():
+            raise FileNotFoundError(
+                f"Mamba-CL model code not found at {_MAMBA_CL_UTILS}. "
+                "MambaBackbone imports it from the repository checkout (baselines/mamba-cl)."
+            )
+        spec = importlib.util.spec_from_file_location(
+            _PKG, init, submodule_search_locations=[str(_MAMBA_CL_UTILS)]
         )
-    spec = importlib.util.spec_from_file_location(
-        _PKG, init, submodule_search_locations=[str(_MAMBA_CL_UTILS)]
-    )
-    pkg = importlib.util.module_from_spec(spec)
-    sys.modules[_PKG] = pkg
+        pkg = importlib.util.module_from_spec(spec)
+        sys.modules[_PKG] = pkg
+        try:
+            spec.loader.exec_module(pkg)
+        except BaseException:
+            del sys.modules[_PKG]
+            raise
     try:
-        spec.loader.exec_module(pkg)
-        return importlib.import_module(cfg_name)
+        return importlib.import_module(full_name)
     except BaseException:
-        for name in [n for n in sys.modules if n == _PKG or n.startswith(_PKG + ".")]:
-            del sys.modules[name]
+        sys.modules.pop(full_name, None)
         raise
 
 
-def check_load_report(missing: list[str], unexpected: list[str]) -> None:
-    """Print the load_state_dict report and raise if the backbone weights did not load."""
-    print(f":: loaded defocus_mamba_base: missing keys {missing}, unexpected keys {unexpected}")
-    bad = [k for k in missing if k.startswith(REQUIRED_KEY_PREFIXES)]
+def _load_mamba_cl_config_module() -> ModuleType:
+    return _load_mamba_cl_module("config")
+
+
+def check_load_report(
+    missing: list[str], unexpected: list[str], arch: str = "defocus_base"
+) -> None:
+    """Print the load report and raise if the backbone weights did not load."""
+    print(f":: loaded {arch}: missing keys {missing}, unexpected keys {unexpected}")
+    bad = [k for k in missing if k.startswith(REQUIRED_KEY_PREFIXES[arch])]
     if bad:
         raise RuntimeError(
             f"Pretrained weights did not load: {len(bad)} required keys are missing "
             f"(e.g. {bad[:4]}). Check the checkpoint file and the model config."
         )
+
+
+def task0_checkpoint(hf_dir: str = "cifar100_10task", seed: int = 0) -> str:
+    """
+    Download (or reuse the HF cache of) the authors' task-0 Vim-small checkpoint, the one
+    both baselines start from. Only seed 0 was released.
+    """
+    from huggingface_hub import hf_hub_download
+
+    filename = f"{hf_dir}/task_0_checkpoint_seed_{seed}.pth"
+    try:
+        return hf_hub_download(TASK0_HF_REPO, filename)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not download {TASK0_HF_REPO}/{filename} ({type(exc).__name__}). "
+            "The authors released seed 0 only."
+        ) from exc
 
 
 def _read_checkpoint(path: Path) -> dict[str, Tensor]:
@@ -119,7 +164,39 @@ def _build_defocus_model(config_path: Path, checkpoint_path: Path) -> nn.Module:
         ) from exc
 
     info = model.load_state_dict(_read_checkpoint(checkpoint_path), strict=False)
-    check_load_report(list(info.missing_keys), list(info.unexpected_keys))
+    check_load_report(list(info.missing_keys), list(info.unexpected_keys), "defocus_base")
+    model.reload_params()
+    return model
+
+
+def _build_vim_small(
+    checkpoint_path: Path | None,
+    num_classes: int,
+    img_size: int = 224,
+    grad_ckpt: bool = False,
+    **kwargs,
+) -> nn.Module:
+    """
+    Mamba-CL's Vim-small with the checkpoint loaded the way the baselines load it
+    (vim_mamba.load_finetune: a head of another shape is dropped), then x_proj split.
+    ``kwargs`` (e.g. depth, embed_dim) are for small test models only.
+    """
+    vim = _load_mamba_cl_module("vim_mamba")
+    model = vim.VisionMamba(
+        img_size=img_size,
+        patch_size=16,
+        embed_dim=kwargs.pop("embed_dim", 384),
+        depth=kwargs.pop("depth", 24),
+        num_classes=num_classes,
+        drop_path_rate=kwargs.pop("drop_path_rate", 0.0),  # Inf-SSM protocol: --drop_path 0
+        grad_ckpt=grad_ckpt,
+        **kwargs,
+    )
+    if checkpoint_path is not None:
+        if not Path(checkpoint_path).is_file():
+            raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+        missing, unexpected = vim.load_finetune(model, str(checkpoint_path))
+        check_load_report(missing, unexpected, "vim_small")
     model.reload_params()
     return model
 
@@ -131,31 +208,83 @@ class MambaBackbone(nn.Module):
         config_path: str | Path | None = None,
         model: nn.Module | None = None,
         image_size: int = 224,
+        arch: str = "vim_small",
+        head_mode: str = "per_task",
+        n_classes_total: int | None = None,
+        grad_ckpt: bool = False,
+        hf_dir: str = "cifar100_10task",
+        seed: int = 0,
     ) -> None:
         """
         Args:
-            checkpoint_path: defocus_mamba_base_cls.pth. Required unless ``model`` is given.
-            config_path:     De-focus yaml; defaults to baselines/mamba-cl/utils/defocus_mamba_base.yaml.
-            model:           Pre-built network exposing ``embed_dim`` and
-                             ``encode_image(x, pre_logits=True)``. Used by tests; skips
-                             building and loading the real model.
+            checkpoint_path: Weights to load. "hf" = the authors' task-0 Vim-small checkpoint
+                             (``hf_dir``, ``seed``); a path = that file. Required for
+                             arch="defocus_base" unless ``model`` is given; None for Vim-small
+                             = random init (tests only).
+            config_path:     De-focus yaml (arch="defocus_base" only); defaults to
+                             baselines/mamba-cl/utils/defocus_mamba_base.yaml.
+            model:           Pre-built network exposing ``embed_dim``, ``head`` and
+                             ``encode_image(x, pre_logits=True)``. Skips building and loading.
             image_size:      Inputs are bicubic-resized to image_size x image_size.
+            arch:            "vim_small" or "defocus_base".
+            head_mode:       "shared" (one head over n_classes_total classes) or "per_task".
+            n_classes_total: Classes over all tasks; required for head_mode="shared".
+            grad_ckpt:       Vim-small: recompute each block in backward (less GPU memory).
+            hf_dir, seed:    Which task-0 checkpoint ``checkpoint_path="hf"`` downloads.
         """
         super().__init__()
-        if model is None:
-            if checkpoint_path is None:
-                raise ValueError("Pass checkpoint_path (real model) or model (stand-in).")
-            model = _build_defocus_model(
-                Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH,
-                Path(checkpoint_path),
-            )
+        if arch not in ARCHS:
+            raise ValueError(f"arch must be one of {ARCHS}, got {arch!r}")
+        if head_mode not in HEAD_MODES:
+            raise ValueError(f"head_mode must be one of {HEAD_MODES}, got {head_mode!r}")
+        if head_mode == "shared" and not n_classes_total:
+            raise ValueError('head_mode="shared" needs n_classes_total.')
 
+        if model is None:
+            if arch == "defocus_base":
+                if checkpoint_path is None:
+                    raise ValueError("Pass checkpoint_path (real model) or model (stand-in).")
+                model = _build_defocus_model(
+                    Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH,
+                    Path(checkpoint_path),
+                )
+            else:
+                if checkpoint_path == "hf":
+                    checkpoint_path = task0_checkpoint(hf_dir, seed)
+                # A head of n_classes_total classes keeps the checkpoint's task-0 head.
+                model = _build_vim_small(
+                    Path(checkpoint_path) if checkpoint_path is not None else None,
+                    num_classes=n_classes_total or 1000,
+                    img_size=image_size,
+                    grad_ckpt=grad_ckpt,
+                )
+
+        self.arch = arch
+        self.head_mode = head_mode
         self.image_size = image_size
         self.feature_dim = int(model.embed_dim)
-        # The 1000-class ImageNet head is replaced by per-task heads below.
+        self.n_classes_total = n_classes_total
+
+        # Classes of every task registered so far (both modes), in task order.
+        self._task_classes: list[int] = []
+        self.heads = nn.ModuleDict()  # per_task: one head per task
+        self.shared_head: nn.Linear | None = None
+        if head_mode == "shared":
+            old = getattr(model, "head", None)
+            if (
+                isinstance(old, nn.Linear)
+                and old.in_features == self.feature_dim
+                and old.out_features == n_classes_total
+            ):
+                self.shared_head = old  # e.g. the task-0 checkpoint's head
+            else:
+                ref = next(model.parameters())
+                self.shared_head = nn.Linear(self.feature_dim, n_classes_total).to(
+                    device=ref.device, dtype=ref.dtype
+                )
+        # The model's own head is replaced by the head(s) above.
         model.head = nn.Identity()
         self.model = model
-        self.heads = nn.ModuleDict()
 
         for name, p in self.model.named_parameters():
             p.requires_grad_(any(pat in name for pat in BACKBONE_TRAINABLE_PATTERNS))
@@ -166,30 +295,50 @@ class MambaBackbone(nn.Module):
 
     @property
     def n_tasks(self) -> int:
-        """Number of task heads created so far."""
-        return len(self.heads)
+        """Number of tasks registered with set_task_head() so far."""
+        return len(self._task_classes)
 
     def set_task_head(self, n_classes: int, task_id: int | None = None) -> nn.Linear:
         """
-        Add a classification head for a new task; earlier heads are kept and frozen.
+        Register task ``task_id`` with ``n_classes`` classes and return the head to train.
+
+        per_task: adds a new head for the task; earlier heads are kept and frozen.
+        shared:   returns the shared head (trainable); the task's classes are the next
+                  ``n_classes`` columns of it.
 
         Args:
-            n_classes: Output classes of the new head.
+            n_classes: Classes of the task.
             task_id:   Task index. None appends as the next task. An existing index
-                       re-creates that head (re-running a task); a gap is an error.
+                       re-registers that task (and drops later ones); a gap is an error.
 
         Returns:
-            The new head. Its parameters are NOT in any previously built optimizer;
-            the caller must build or extend the optimizer with them.
+            The head to train. A new per-task head is NOT in any previously built
+            optimizer; the caller must build or extend the optimizer with it.
         """
         if task_id is None:
-            task_id = len(self.heads)
-        if not 0 <= task_id <= len(self.heads):
-            raise ValueError(f"task_id={task_id} leaves a gap; {len(self.heads)} heads exist.")
+            task_id = len(self._task_classes)
+        if not 0 <= task_id <= len(self._task_classes):
+            raise ValueError(
+                f"task_id={task_id} leaves a gap; {len(self._task_classes)} tasks exist."
+            )
 
+        classes = self._task_classes[:task_id] + [int(n_classes)]
+        if self.head_mode == "shared":
+            if sum(classes) > self.n_classes_total:
+                raise ValueError(
+                    f"Tasks 0..{task_id} have {sum(classes)} classes but the shared head has "
+                    f"{self.n_classes_total}."
+                )
+            self._task_classes = classes
+            self.shared_head.requires_grad_(True)
+            return self.shared_head
+
+        for key in [k for k in self.heads.keys() if int(k) > task_id]:
+            del self.heads[key]
         ref = next(self.model.parameters())
         head = nn.Linear(self.feature_dim, n_classes).to(device=ref.device, dtype=ref.dtype)
         self.heads[str(task_id)] = head
+        self._task_classes = classes
 
         for key, h in self.heads.items():
             h.requires_grad_(key == str(task_id))
@@ -199,13 +348,17 @@ class MambaBackbone(nn.Module):
                     p.grad = None
         return head
 
-    def _head(self, task_id: int | None) -> nn.Linear:
-        if len(self.heads) == 0:
+    def _check_task(self, task_id: int | None) -> int:
+        if not self._task_classes:
             raise RuntimeError("No task head yet; call set_task_head() first.")
-        key = str(len(self.heads) - 1 if task_id is None else task_id)
-        if key not in self.heads:
-            raise KeyError(f"No head for task {task_id}; have {list(self.heads.keys())}.")
-        return self.heads[key]
+        t = len(self._task_classes) - 1 if task_id is None else int(task_id)
+        if not 0 <= t < len(self._task_classes):
+            raise KeyError(f"No head for task {task_id}; {len(self._task_classes)} tasks exist.")
+        return t
+
+    def _head(self, task_id: int | None) -> nn.Linear:
+        t = self._check_task(task_id)
+        return self.shared_head if self.head_mode == "shared" else self.heads[str(t)]
 
     def head_parameters(self, task_id: int | None = None) -> list[nn.Parameter]:
         return list(self._head(task_id).parameters())
@@ -213,28 +366,43 @@ class MambaBackbone(nn.Module):
     def class_offset(self, task_id: int) -> int:
         """
         Index of task ``task_id``'s first class in joined_logits(): the number of classes
-        of all earlier heads. Global label = class_offset(task_id) + local label.
+        of all earlier tasks. Global label = class_offset(task_id) + local label.
         """
-        self._head(task_id)  # raises for a task with no head
-        return sum(self.heads[str(t)].out_features for t in range(task_id))
+        t = self._check_task(task_id)
+        return sum(self._task_classes[:t])
+
+    def label_offset(self, task_id: int | None = None) -> int:
+        """Shift from the loader's local labels to the label space of forward()'s logits."""
+        t = self._check_task(task_id)
+        return self.class_offset(t) if self.head_mode == "shared" else 0
+
+    def task_logits(self, hidden: Tensor, task_id: int | None = None) -> Tensor:
+        """Logits of task ``task_id``'s own classes only (task-incremental evaluation)."""
+        t = self._check_task(task_id)
+        if self.head_mode == "per_task":
+            return self.heads[str(t)](hidden)
+        start = self.class_offset(t)
+        return self.shared_head(hidden)[:, start : start + self._task_classes[t]]
 
     def joined_logits(self, hidden: Tensor) -> Tensor:
         """
-        Logits of every head, concatenated in task order: one head over all classes seen
-        so far, as Mamba-CL builds for evaluation (modify_head with training=False).
+        Logits of every class seen so far, in task order: one head over all seen classes,
+        as Mamba-CL (joined heads) and Inf-SSM (shared head, columns of seen classes)
+        evaluate.
 
         Args:
             hidden: (B, feature_dim), from extract_hidden().
 
         Returns:
-            (B, total number of classes over all heads)
+            (B, total number of classes over all registered tasks)
         """
-        if len(self.heads) == 0:
-            raise RuntimeError("No task head yet; call set_task_head() first.")
+        self._check_task(None)
+        if self.head_mode == "shared":
+            return self.shared_head(hidden)[:, : sum(self._task_classes)]
         return torch.cat([self.heads[str(t)](hidden) for t in range(len(self.heads))], dim=-1)
 
     def backbone_parameters(self) -> list[nn.Parameter]:
-        """Trainable backbone parameters (x_proj*, out_proj.weight, A_log), excluding heads."""
+        """Trainable backbone parameters (x_proj*, out_proj.weight, A_log, A_b_log), no heads."""
         return [p for p in self.model.parameters() if p.requires_grad]
 
     # ------------------------------------------------------------------
@@ -270,11 +438,15 @@ class MambaBackbone(nn.Module):
         """
         Args:
             x:       Images (B, 3, H, W); resized to image_size inside.
-            task_id: Head to use; None = most recently added head.
+            task_id: Task being trained; None = the most recently registered task.
 
         Returns:
-            logits: (B, n_classes_of_head)
+            logits: per_task: (B, classes of task ``task_id``), local labels.
+                    shared:   (B, classes of tasks 0..task_id), labels + label_offset().
             hidden: (B, feature_dim)
         """
+        t = self._check_task(task_id)
         hidden = self.extract_hidden(x)
-        return self._head(task_id)(hidden), hidden
+        if self.head_mode == "shared":
+            return self.shared_head(hidden)[:, : sum(self._task_classes[: t + 1])], hidden
+        return self.heads[str(t)](hidden), hidden

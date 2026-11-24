@@ -82,9 +82,9 @@ Living design doc. Update this when the architecture changes — the proposal is
 Locked decisions — do not change without updating this section and notifying the full team.
 
 ### 1. Hidden State Extraction Point
-**Decision:** `model.encode_image(x, pre_logits=True)` of the De-focus Mamba base network — the final-norm output at the class token → shape `(B, 768)`. This replaces the earlier toy backbone (mean-pooled last layer, `d_model=128`).
+**Decision:** `model.encode_image(x, pre_logits=True)` of Vim-small — the final-norm output at the middle class token → shape `(B, 384)`. (With `arch: defocus_base`, the older De-focus Mamba base network, it is `(B, 768)`.)
 
-**Why:** The backbone is now the exact network Mamba-CL runs (`baselines/mamba-cl`, `defocus_mamba_base.yaml`, checkpoint `defocus_mamba_base_cls.pth`), and this is the feature Mamba-CL's `extract_class_features` reads. A different network or layer makes the Table 1 comparison invalid.
+**Why:** Vim-small is the network of both baselines (Inf-SSM, and Mamba-CL under the Inf-SSM protocol; `baselines/mamba-cl/utils/vim_mamba.py`), and this is the feature their heads read. A different network or layer makes the Table 1 comparison invalid.
 
 ### 2. Null-Space Projector Rank Budget
 **Decision:** `rank_budget = 200` singular vectors max (GPM default). Same value used in Mamba-CL.
@@ -124,12 +124,16 @@ Mamba 2 is faster (3–8×) and planned for Stage 2 (hybrid architecture on Jets
 Accuracy is **class-incremental** by default (`eval.mode: class_il`), matching Mamba-CL's `evaluate_tasks_sofar`: after task `i`, the heads of tasks `0..i` are joined into one head over all seen classes, task `j`'s local labels are shifted by the number of classes in earlier heads, and a prediction is correct only if the argmax over every seen class is right. `eval.mode: task_il` scores each task with its own head (the task identity is given); it is easier and is not comparable to the baselines.
 
 ### 8. Backbone and Phase 2 (joint) scope
-**Decision:** `MambaBackbone` wraps the De-focus Mamba base network from `baselines/mamba-cl` (24 blocks, width 768), loads the pretrained checkpoint, keeps **one classification head per task**, and fine-tunes only `head`, `x_proj`, `out_proj.weight`, `A_log` (Mamba-CL `--training_string`). Images are bicubic-resized to 224 inside the backbone. The optimizer is rebuilt per task (new head included), as Mamba-CL does.
+**Decision:** `MambaBackbone` wraps Vim-small from `baselines/mamba-cl/utils/vim_mamba.py` (24 blocks, width 384) and loads the authors' task-0 checkpoint (`checkpoint_path: hf` → `ileening0022/Inf-SSM`, `cifar100_10task/task_0_checkpoint_seed_0.pth`), the same start as both baselines. It fine-tunes only `head`, `x_proj`, `out_proj.weight`, `A_log`, `A_b_log` (Mamba-CL `--training_string`, plus Vim's backward A). Images are bicubic-resized to 224 inside the backbone. The optimizer is rebuilt per task, as Mamba-CL does.
+
+The protocol follows the shared-head baselines: Split-CIFAR100 **10×10 in natural class order** with ImageNet normalisation, **one shared 100-way head** (`head_mode: shared`, loaded from the task-0 checkpoint; CE over all classes seen so far, head weight decay 0), task 0 not retrained (`training.train_first_task: false`), Adam-style lr 2e-4 with the head at ×50, seed 0. `head_mode: per_task` and `arch: defocus_base` keep the older Mamba-CL-own-protocol setup (20×5, one head per task, 768-d).
+
+Still different from the baselines: CIFAR images are upsampled from 32×32 with crop + flip only (the baselines use 224 RandAugment, mixup/cutmix and label smoothing), batch 64 (baselines 128), and 5 + 10 epochs per task (baselines 40).
 
 **Known limitations of the Phase 2 loop** (open design questions — see the `trainer.py` module docstring):
-- `NullSpaceProjector` holds a single 768-d basis, so only `out_proj.weight` (first axis) can be projected. `x_proj_*` and `A_log` have no 768 axis; they are skipped (logged once, counted in the metrics) and train **unprotected**. Mamba-CL builds a separate basis per parameter from that layer's input activations.
-- Task heads are **not** projected, by design: earlier heads are frozen and the current head only produces the current task's logits, so projecting its gradient would protect nothing and only slow the new head down.
-- The head learning rate is `lr × head_lr_scale` = 1e-3 × 10 = 1e-2, the same as Mamba-CL (2e-4 × 50). The backbone lr is 1e-3 (Mamba-CL: 2e-4).
+- `NullSpaceProjector` holds a single basis of the feature width (384), so only `out_proj.weight` (first axis) can be projected. `x_proj_*`, `A_log` and `A_b_log` have no such axis; they are skipped (logged once, counted in the metrics) and train **unprotected**. Mamba-CL builds a separate basis per parameter from that layer's input activations.
+- The head is **not** projected. With per-task heads that protects nothing; with the shared head the old classes' columns are trained by the current task's CE, which is where replay of old hidden states through the head is meant to help.
+- The head learning rate is `lr × head_lr_scale` = 2e-4 × 50 = 1e-2, as Mamba-CL. The backbone lr is 2e-4.
 - Gradients are projected *before* AdamW, which rescales elements and can leave the null space; Mamba-CL projects the *update*.
 - Replay samples are generated in the backbone's output space, so a loss on them cannot change the backbone. The default replay term is a no-grad ELBO value kept for monitoring; `Trainer._replay_loss` is the one place to change it.
 

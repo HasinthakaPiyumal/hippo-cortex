@@ -8,7 +8,7 @@ Reproduce Mamba-CL and Inf-SSM baselines, then demonstrate **+8–10% average ac
 
 ## Metrics
 
-- Average Accuracy (AA) after all 20 tasks
+- Average Accuracy (AA) after all 10 tasks (10 × 10, natural class order)
 - Average Forgetting (AF)
 - Backward Transfer (BWT)
 - Memory footprint (should stay constant across tasks — the headline claim)
