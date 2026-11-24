@@ -133,7 +133,11 @@ def _posterize(img, bits_to_keep, **__):
     return img.point(lut * len(img.getbands()))
 
 
-def _inf_ssm_transform(train: bool) -> transforms.Compose:
+def _inf_ssm_transform(
+    train: bool, eval_stats: tuple = (CIFAR100_MEAN, CIFAR100_STD)
+) -> transforms.Compose:
+    """Inf-SSM build_transform. Train is normalised with ImageNet stats (timm's default); eval with
+    eval_stats, the dataset's own (CIFAR-100 for CIFAR, ImageNet for ImageNet-R)."""
     c = INF_SSM_TRANSFORM
     if train:
         import timm.data.auto_augment as timm_aa
@@ -153,7 +157,7 @@ def _inf_ssm_transform(train: bool) -> transforms.Compose:
                           interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.CenterCrop(c["input_size"]),
         transforms.ToTensor(),
-        transforms.Normalize(CIFAR100_MEAN, CIFAR100_STD),
+        transforms.Normalize(*eval_stats),
     ])
 
 
