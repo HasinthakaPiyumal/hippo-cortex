@@ -13,6 +13,11 @@ Three phases per task:
                     NullSpaceProjector (consolidate()). No backbone update. ← IMPLEMENTED
                     training.consolidate: false skips it (tests that stub it).
 
+Heads: with a shared head (backbone head_mode="shared", the Inf-SSM protocol) the CE runs
+over every class seen so far, with the loader's local labels shifted by
+backbone.label_offset(task_id); with per-task heads the offset is 0. training.train_first_task
+= false skips Phases 1-2 for task 0, whose weights come from the task-0 checkpoint.
+
 evaluate() fills one row of the acc_matrix after each task completes. By default it is
 class-incremental, as in Mamba-CL: the heads of all tasks seen so far are joined into one
 and the prediction is the argmax over every seen class. mode="task_il" scores a task with
@@ -25,9 +30,9 @@ Phase 2 notes
   d_model-sized axis: out_proj.weight (d_model, d_inner). x_proj_* (…, d_inner) and
   A_log (d_inner, d_state) have no such axis and are SKIPPED (one-time warning; counts
   are returned in the metrics). Until per-parameter bases exist (as in Mamba-CL's
-  ModAdam) those parameters train unprotected. Task heads are never projected: earlier
-  heads are frozen, and the current head only produces the current task's logits, so
-  projecting it would protect nothing and only slow the new head down.
+  ModAdam) those parameters train unprotected. Heads are never projected: per-task heads
+  only produce their own task's logits, and a shared head's old columns are what replay
+  through the head (not yet implemented) is meant to protect.
 * Projection point. The gradient is projected before AdamW, which rescales every element
   and can move the update out of the null space. Mamba-CL projects the update instead.
 * Replay term. Past hidden states come from the SWR generator, i.e. they live in the
@@ -147,24 +152,36 @@ class Trainer:
         """
         self._start_task(task_id)
 
-        # ── Phase 1: Warmup ────────────────────────────────────────────
-        # Supervised cross-entropy on the current task. No replay, no projection.
-        warmup_loss = self._run_warmup(task_id, loader)
-        _log.info("Task %d | warmup done | avg_loss=%.4f", task_id, warmup_loss)
+        if task_id == 0 and not self.cfg.training.get("train_first_task", True):
+            # The backbone (and shared head) come from a checkpoint already trained on task
+            # 0, as in the Inf-SSM protocol: only the sleep phase runs for task 0.
+            _log.info("Task 0 | training skipped (training.train_first_task=false)")
+            warmup_loss = 0.0
+            joint = {
+                "loss_joint": 0.0,
+                "replay_loss": 0.0,
+                "proj_params_projected": 0,
+                "proj_params_skipped": 0,
+            }
+        else:
+            # ── Phase 1: Warmup ────────────────────────────────────────
+            # Supervised cross-entropy on the current task. No replay, no projection.
+            warmup_loss = self._run_warmup(task_id, loader)
+            _log.info("Task %d | warmup done | avg_loss=%.4f", task_id, warmup_loss)
 
-        # ── Phase 2: Joint ─────────────────────────────────────────────
-        # CE on the current task + replay term, gradients projected, clipped, stepped.
-        # Task 0 (or any task with an empty buffer) has no replay and, until the first
-        # consolidation, no projection basis either.
-        joint = self._run_joint(task_id, loader)
-        _log.info(
-            "Task %d | joint done | avg_loss=%.4f | replay=%.4f | projected=%d skipped=%d",
-            task_id,
-            joint["loss_joint"],
-            joint["replay_loss"],
-            joint["proj_params_projected"],
-            joint["proj_params_skipped"],
-        )
+            # ── Phase 2: Joint ─────────────────────────────────────────
+            # CE on the current task + replay term, gradients projected, clipped, stepped.
+            # Task 0 (or any task with an empty buffer) has no replay and, until the first
+            # consolidation, no projection basis either.
+            joint = self._run_joint(task_id, loader)
+            _log.info(
+                "Task %d | joint done | avg_loss=%.4f | replay=%.4f | projected=%d skipped=%d",
+                task_id,
+                joint["loss_joint"],
+                joint["replay_loss"],
+                joint["proj_params_projected"],
+                joint["proj_params_skipped"],
+            )
 
         # ── Phase 3: Consolidation ─────────────────────────────────────
         # Sleep: fine-tune the generator on this task + replay, store (µ, σ²), extend U.
@@ -223,7 +240,9 @@ class Trainer:
                     if mode == "class_il":
                         logits = self.backbone.joined_logits(self.backbone.extract_hidden(images))
                     else:
-                        logits, _hidden = self.backbone(images, task_id=task_id)
+                        logits = self.backbone.task_logits(
+                            self.backbone.extract_hidden(images), task_id
+                        )
                 preds = logits.argmax(dim=-1)
                 correct += (preds == labels + offset).sum().item()
                 total += labels.size(0)
@@ -284,6 +303,9 @@ class Trainer:
             {
                 "params": self.backbone.head_parameters(task_id),
                 "lr": lr * float(t.get("head_lr_scale", 1.0)),
+                # A shared head keeps the old tasks' columns: weight decay would erase them
+                # (the shared-head Mamba-CL baseline runs with head weight decay 0).
+                "weight_decay": float(t.get("head_weight_decay", t.get("weight_decay", 0.01))),
             },
         ]
         return torch.optim.AdamW(
@@ -300,6 +322,7 @@ class Trainer:
     def _run_warmup(self, task_id: int, loader: DataLoader) -> float:
         epochs = int(self.cfg.training.epochs_warmup)
         loss_sum = 0.0
+        offset = self.backbone.label_offset(task_id)  # shared head: global labels
 
         for epoch in range(epochs):
             epoch_loss = 0.0
@@ -312,7 +335,7 @@ class Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 with self._autocast():
                     logits, _hidden = self.backbone(images, task_id=task_id)
-                    loss = self._criterion(logits.float(), labels)
+                    loss = self._criterion(logits.float(), labels + offset)
                 self.scaler.scale(loss).backward()
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
@@ -387,7 +410,7 @@ class Trainer:
 
         with self._autocast():
             logits, _hidden = self.backbone(images, task_id=task_id)
-            ce_loss = self._criterion(logits.float(), labels)
+            ce_loss = self._criterion(logits.float(), labels + self.backbone.label_offset(task_id))
 
         replay_loss = self._replay_loss(task_id, n_samples=images.shape[0])
         total_loss = ce_loss + replay_loss
@@ -438,7 +461,7 @@ class Trainer:
         Only backbone parameters (self.backbone.model) are considered; task heads are not
         projected (see the module docstring). NullSpaceProjector.project() acts on the LAST
         axis of its input and raises if that axis is not d_model, so per parameter:
-          * grad.shape[-1] == d_model              -> project(grad)          (none in De-focus Mamba base)
+          * grad.shape[-1] == d_model              -> project(grad)          (none in Vim-small)
           * 2-D grad with grad.shape[0] == d_model -> project(grad.T).T      (out_proj.weight)
           * otherwise                              -> skipped, left unprojected.
         With no basis yet (before the first consolidation) nothing is touched.

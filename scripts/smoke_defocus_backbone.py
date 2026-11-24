@@ -93,7 +93,7 @@ def main() -> int:
         # the shape-based projection treat every weight as projectable.
         backbone = MambaBackbone(model=TinyDefocus(embed_dim=64, depth=2, d_inner=96), image_size=64)
     else:
-        backbone = MambaBackbone(checkpoint_path=args.checkpoint)  # raises if blocks.* / patch_embed.* missing
+        backbone = MambaBackbone(checkpoint_path=args.checkpoint, arch="defocus_base")  # raises if blocks.* / patch_embed.* missing
     check("checkpoint loaded, backbone weights present", True, f"{time.time() - t0:.1f}s")
     dim = backbone.feature_dim
     if not args.cpu_dry_run:

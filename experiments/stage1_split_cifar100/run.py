@@ -12,7 +12,7 @@ Usage:
 
 Reads experiments/stage1_split_cifar100/config.yaml via OmegaConf; command-line
 ``key.path=value`` arguments override it (an unknown key is an error).
-Runs dataset.n_tasks sequential tasks (20 by default); fills acc_matrix (accuracy as
+Runs dataset.n_tasks sequential tasks (10 by default); fills acc_matrix (accuracy as
 set by eval.mode, class-incremental by default); logs metrics to wandb.
 
 After completing all tasks, saves:
@@ -39,7 +39,7 @@ from hippocortex.models.swr_generator import SWRGenerator
 from hippocortex.cl.stats_buffer import StatsBuffer
 from hippocortex.cl.null_space_projector import NullSpaceProjector
 from hippocortex.training.trainer import Trainer
-from hippocortex.data.split_cifar100 import get_task_loaders, download_if_missing, N_TASKS
+from hippocortex.data.split_cifar100 import get_task_loaders, download_if_missing, N_CLASSES
 
 _log = get_logger(__name__)
 _CONFIG = Path(__file__).parent / "config.yaml"
@@ -48,8 +48,21 @@ _CONFIG = Path(__file__).parent / "config.yaml"
 def main(argv: list[str] | None = None) -> None:
     cfg = load_config(_CONFIG, overrides=sys.argv[1:] if argv is None else argv)
     n_tasks = int(cfg.dataset.n_tasks)
-    if not 1 <= n_tasks <= N_TASKS:
-        raise ValueError(f"dataset.n_tasks must be in [1, {N_TASKS}], got {n_tasks}")
+    per_task = int(cfg.dataset.n_classes_per_task)
+    # The split always has 100 / n_classes_per_task tasks; n_tasks may stop early (smoke runs).
+    if per_task <= 0 or N_CLASSES % per_task:
+        raise ValueError(f"dataset.n_classes_per_task must divide {N_CLASSES}, got {per_task}")
+    split_tasks = N_CLASSES // per_task
+    if not 1 <= n_tasks <= split_tasks:
+        raise ValueError(f"dataset.n_tasks must be in [1, {split_tasks}], got {n_tasks}")
+    data_kw = dict(
+        seed=int(cfg.seed),
+        n_tasks=split_tasks,
+        class_order=cfg.dataset.get("class_order", "random"),
+        normalize=cfg.dataset.get("normalize", "cifar"),
+        num_workers=int(cfg.dataset.get("num_workers", 4)),
+        pin_memory=bool(cfg.dataset.get("pin_memory", False)),
+    )
     set_seed(cfg.seed)
     wandb_logger.init(cfg)
 
@@ -59,10 +72,17 @@ def main(argv: list[str] | None = None) -> None:
     download_if_missing(cfg.dataset.root)
 
     # ── Model setup ─────────────────────────────────────────────────────────
+    bb_cfg = cfg.model.backbone
     backbone = MambaBackbone(
-        checkpoint_path=cfg.model.backbone.checkpoint_path,
-        config_path=cfg.model.backbone.config_path,
-        image_size=cfg.model.backbone.image_size,
+        checkpoint_path=bb_cfg.checkpoint_path,
+        config_path=bb_cfg.get("config_path"),
+        image_size=bb_cfg.image_size,
+        arch=bb_cfg.get("arch", "vim_small"),
+        head_mode=bb_cfg.get("head_mode", "per_task"),
+        n_classes_total=N_CLASSES,
+        grad_ckpt=bool(bb_cfg.get("grad_ckpt", False)),
+        hf_dir=bb_cfg.get("hf_dir", "cifar100_10task"),
+        seed=int(cfg.seed),
     ).to(device)
     if backbone.feature_dim != cfg.model.mamba_d_model:
         raise ValueError(
@@ -91,7 +111,10 @@ def main(argv: list[str] | None = None) -> None:
         _log.info("── Task %d / %d ──", task_id + 1, n_tasks)
 
         tracker.task_start(task_id)
-        train_loader = get_task_loaders(task_id, "train", cfg.dataset.root, cfg.training.batch_size)
+        train_loader = get_task_loaders(
+            task_id, "train", cfg.dataset.root, cfg.training.batch_size,
+            augment=bool(cfg.dataset.get("augment", True)), **data_kw,
+        )
         metrics = trainer.train_task(task_id, train_loader)
         tracker.task_end(task_id)
 
@@ -107,7 +130,9 @@ def main(argv: list[str] | None = None) -> None:
         # Evaluate on all tasks seen so far
         accs = {}
         for eval_id in range(task_id + 1):
-            test_loader = get_task_loaders(eval_id, "test", cfg.dataset.root, cfg.training.batch_size)
+            test_loader = get_task_loaders(
+                eval_id, "test", cfg.dataset.root, int(cfg.eval.get("eval_batch_size", 256)), **data_kw
+            )
             acc = trainer.evaluate(eval_id, test_loader)
             cl_metrics.record(task_id, eval_id, acc)
             accs[f"acc/task_{eval_id}"] = acc

@@ -1,5 +1,5 @@
 """
-Split-CIFAR100 data loader — 20 sequential tasks of 5 classes each.
+Split-CIFAR100 data loader — 20 tasks of 5 classes by default, or any n_tasks that divides 100.
 
 OWNER: Induwara Mihisara
 
@@ -10,9 +10,13 @@ Expected layout (what ``scripts/download_datasets.py`` produces):
 where ``root`` is ``dataset.root`` in the experiment config (``data/cifar100``).
 
 Implementation notes:
-- Class order is ``np.random.default_rng(seed).permutation(100)``; task t owns
-  classes ``order[5t : 5t+5]``. The split is written to ``<root>/task_split.json``
-  the first time it is built so baselines can reuse it.
+- Class order is ``np.random.default_rng(seed).permutation(100)`` (class_order="random",
+  default) or 0..99 (class_order="natural", the Inf-SSM protocol, whose task-0 checkpoint
+  was trained on classes 0-9). Task t owns ``order[k*t : k*t+k]`` with k = 100 / n_tasks.
+  The default 20-task random split is written to ``<root>/task_split.json`` the first time
+  it is built so baselines can reuse it.
+- normalize="cifar" (default) uses the CIFAR-100 mean/std; "imagenet" the ImageNet ones,
+  which the Vim-small checkpoints expect.
 - Labels are remapped to [0, N_CLASSES_PER_TASK) in the order the classes appear
   in the task's slice of the permutation.
 - CIFAR-100 has no validation split; ``split="val"`` returns the test set.
@@ -33,6 +37,10 @@ from torchvision import datasets, transforms
 
 CIFAR100_MEAN = (0.5071, 0.4867, 0.4408)
 CIFAR100_STD = (0.2675, 0.2565, 0.2761)
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+_NORMALIZE = {"cifar": (CIFAR100_MEAN, CIFAR100_STD), "imagenet": (IMAGENET_MEAN, IMAGENET_STD)}
+CLASS_ORDERS = ("random", "natural")
 N_TASKS = 20
 N_CLASSES_PER_TASK = 5
 N_CLASSES = N_TASKS * N_CLASSES_PER_TASK
@@ -59,32 +67,45 @@ def download_if_missing(root: str | Path) -> None:
     module.fetch_cifar100(Path(root))
 
 
-def get_task_classes(seed: int = 42) -> dict[int, list[int]]:
-    """Map task_id -> list of the N_CLASSES_PER_TASK original CIFAR-100 labels."""
-    order = np.random.default_rng(seed).permutation(N_CLASSES).tolist()
-    return {
-        t: order[t * N_CLASSES_PER_TASK : (t + 1) * N_CLASSES_PER_TASK]
-        for t in range(N_TASKS)
-    }
+def get_task_classes(
+    seed: int = 42, n_tasks: int = N_TASKS, class_order: str = "random"
+) -> dict[int, list[int]]:
+    """Map task_id -> list of the 100 / n_tasks original CIFAR-100 labels of that task."""
+    if class_order not in CLASS_ORDERS:
+        raise ValueError(f"class_order must be one of {CLASS_ORDERS}, got {class_order!r}")
+    if n_tasks <= 0 or N_CLASSES % n_tasks:
+        raise ValueError(f"n_tasks must divide {N_CLASSES}, got {n_tasks}")
+    k = N_CLASSES // n_tasks
+    if class_order == "natural":
+        order = list(range(N_CLASSES))
+    else:
+        order = np.random.default_rng(seed).permutation(N_CLASSES).tolist()
+    return {t: order[t * k : (t + 1) * k] for t in range(n_tasks)}
 
 
-def _build_transform(augment: bool) -> transforms.Compose:
+def _build_transform(augment: bool, normalize: str = "cifar") -> transforms.Compose:
+    if normalize not in _NORMALIZE:
+        raise ValueError(f"normalize must be one of {tuple(_NORMALIZE)}, got {normalize!r}")
     steps = []
     if augment:
         steps += [transforms.RandomCrop(32, padding=4), transforms.RandomHorizontalFlip()]
-    steps += [transforms.ToTensor(), transforms.Normalize(CIFAR100_MEAN, CIFAR100_STD)]
+    steps += [transforms.ToTensor(), transforms.Normalize(*_NORMALIZE[normalize])]
     return transforms.Compose(steps)
 
 
 @lru_cache(maxsize=None)
-def _load_cifar100(root: str, train: bool, augment: bool) -> datasets.CIFAR100:
+def _load_cifar100(
+    root: str, train: bool, augment: bool, normalize: str = "cifar"
+) -> datasets.CIFAR100:
     if not is_available(root):
         raise FileNotFoundError(
             f"CIFAR-100 not found under {Path(root) / _EXTRACTED_DIR}. "
             "Run 'python scripts/download_datasets.py --dataset cifar100' "
             "or call download_if_missing(root)."
         )
-    return datasets.CIFAR100(root=root, train=train, download=False, transform=_build_transform(augment))
+    return datasets.CIFAR100(
+        root=root, train=train, download=False, transform=_build_transform(augment, normalize)
+    )
 
 
 def _write_task_split(root: Path, task_classes: dict[int, list[int]], seed: int) -> None:
@@ -120,6 +141,9 @@ def get_task_loaders(
     seed: int = 42,
     augment: bool = True,
     pin_memory: bool = False,
+    n_tasks: int = N_TASKS,
+    class_order: str = "random",
+    normalize: str = "cifar",
 ) -> DataLoader:
     """
     Return a DataLoader for a single task of Split-CIFAR100.
@@ -133,22 +157,26 @@ def get_task_loaders(
         seed:        Seed for the class-to-task permutation.
         augment:     Random crop + horizontal flip; applied to "train" only.
         pin_memory:  Passed through to DataLoader.
+        n_tasks:     Number of tasks; must divide 100 (10 x 10 for the Inf-SSM protocol).
+        class_order: "random" (seeded permutation) or "natural" (0..99).
+        normalize:   "cifar" or "imagenet" mean/std.
 
     Returns:
-        DataLoader yielding (images (B, 3, 32, 32), labels in [0, N_CLASSES_PER_TASK)).
+        DataLoader yielding (images (B, 3, 32, 32), labels in [0, 100 / n_tasks)).
         Shuffled for "train" only.
     """
-    if not (0 <= task_id < N_TASKS):
-        raise ValueError(f"task_id must be in [0, {N_TASKS}), got {task_id}")
+    if not (0 <= task_id < n_tasks):
+        raise ValueError(f"task_id must be in [0, {n_tasks}), got {task_id}")
     if split not in ("train", "val", "test"):
         raise ValueError(f"split must be 'train', 'val' or 'test', got {split!r}")
 
     root_path = Path(root)
     train = split == "train"
-    base = _load_cifar100(str(root_path), train, augment and train)
+    base = _load_cifar100(str(root_path), train, augment and train, normalize)
 
-    task_classes = get_task_classes(seed)
-    _write_task_split(root_path, task_classes, seed)
+    task_classes = get_task_classes(seed, n_tasks, class_order)
+    if n_tasks == N_TASKS and class_order == "random":
+        _write_task_split(root_path, task_classes, seed)
 
     return DataLoader(
         _TaskDataset(base, task_classes[task_id]),

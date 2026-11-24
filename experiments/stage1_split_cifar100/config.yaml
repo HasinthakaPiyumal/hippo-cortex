@@ -10,9 +10,9 @@
 # -----------------------------------------------------------------------------
 # Reproducibility
 # -----------------------------------------------------------------------------
-seed: 42
-# 42 is used by Mamba-CL and Inf-SSM baselines — keeping the same seed lets
-# us attribute accuracy differences to the algorithm, not random init.
+seed: 0
+# Seed 0, as the baseline runs (Inf-SSM protocol, seeds 0/10/100): the authors released the
+# task-0 checkpoint for seed 0 only (model.backbone.checkpoint_path: hf).
 
 # -----------------------------------------------------------------------------
 # Dataset
@@ -21,8 +21,11 @@ dataset:
   name: split_cifar100
   root: data/cifar100          # relative to repo root; gitignored
 
-  n_tasks: 20                  # 20 disjoint tasks drawn from CIFAR-100
-  n_classes_per_task: 5        # 20 × 5 = 100 classes total
+  n_tasks: 10                  # tasks to run (< 100 / n_classes_per_task stops early, for smoke runs)
+  n_classes_per_task: 10       # 10 × 10 = 100 classes (Inf-SSM protocol); must divide 100
+  class_order: natural         # natural: task t = classes 10t..10t+9 (the task-0 checkpoint
+                               #   was trained on classes 0-9); random: seeded permutation
+  normalize: imagenet          # imagenet mean/std, as the Vim-small checkpoints expect; or cifar
 
   # Data loading
   num_workers: 4               # DataLoader worker threads; set to 0 on Windows
@@ -36,15 +39,23 @@ dataset:
 # Model architecture
 # -----------------------------------------------------------------------------
 model:
-  # Backbone: De-focus Mamba base — the same network the Mamba-CL baseline runs, so
-  # results are comparable. Built from baselines/mamba-cl; only head, x_proj,
-  # out_proj.weight and A_log are fine-tuned (Mamba-CL --training_string).
-  mamba_d_model: 768           # feature width = encode_image(pre_logits=True); also the
-                               # SWR generator / null-space projector dimension
+  # Backbone: Vim-small — the network of both baselines (Inf-SSM, and Mamba-CL under the
+  # Inf-SSM protocol), so HippoCortex sits in the same table. Built from
+  # baselines/mamba-cl/utils/vim_mamba.py; only the head, x_proj, out_proj.weight, A_log and
+  # A_b_log are fine-tuned (Mamba-CL --training_string).
+  mamba_d_model: 384           # feature width = encode_image(pre_logits=True); also the SWR
+                               # generator / null-space projector dimension (768 for defocus_base)
   backbone:
-    config_path: null          # null → baselines/mamba-cl/utils/defocus_mamba_base.yaml
-    checkpoint_path: checkpoints/defocus_mamba_base_cls.pth   # gitignored, ~371 MB
+    arch: vim_small            # vim_small | defocus_base (Mamba-CL's own protocol, 768-d)
+    checkpoint_path: hf        # hf = the authors' task-0 checkpoint (ileening0022/Inf-SSM,
+                               #   <hf_dir>/task_0_checkpoint_seed_<seed>.pth); or a local path
+                               #   (defocus_base: checkpoints/defocus_mamba_base_cls.pth)
+    hf_dir: cifar100_10task
+    config_path: null          # defocus_base only; null → baselines/mamba-cl/utils/defocus_mamba_base.yaml
     checkpoint_url: https://github.com/OpenGVLab/De-focus-Attention-Networks/releases/download/v1.0/defocus_mamba_base_cls.pth
+    head_mode: shared          # shared: one 100-way head (Inf-SSM protocol; the task-0 head is
+                               #   loaded from the checkpoint); per_task: one head per task
+    grad_ckpt: false           # recompute each Vim block in backward: less memory, ~30% slower
     image_size: 224            # CIFAR 32x32 inputs are bicubic-resized to this in the backbone
 
   # UNUSED since the De-focus backbone replaced the toy Mamba stack. Kept so older
@@ -69,9 +80,13 @@ model:
 # Training — three phases per task
 # -----------------------------------------------------------------------------
 # Total epochs per task = epochs_warmup + epochs_joint + epochs_consolidation
-# = 5 + 10 + 3 = 18 epochs / task × 20 tasks = 360 epochs total
+# = 5 + 10 + 3 = 18 epochs / task × 9 trained tasks (task 0 comes from the checkpoint)
 
 training:
+  # Task 0 comes trained in the task-0 checkpoint (as for the baselines): false runs only
+  # the sleep phase for it. Set true when starting from untrained weights.
+  train_first_task: false
+
   # Phase 1 — Warmup
   # Pure cross-entropy on the current task. No replay, no projection.
   # Warms the task head and lets the backbone specialise before gradients
@@ -90,13 +105,13 @@ training:
 
   # Optimiser (backbone — Phase 1 and 2)
   optimizer: adamw
-  lr: 1.0e-3                   # matches Mamba-CL paper (Table 2)
-  weight_decay: 1.0e-4         # L2 regularisation via AdamW decoupling
+  lr: 2.0e-4                   # as the shared-head Mamba-CL baseline (--optim mamba_cl)
+  weight_decay: 5.0e-5         # as the shared-head Mamba-CL baseline
+  head_weight_decay: 0.0       # the shared head keeps old classes; decay would erase them
   betas: [0.9, 0.999]          # AdamW momentum terms (PyTorch defaults)
 
-  # Task heads train at lr × head_lr_scale. 1e-3 × 10 = 1e-2, the same head lr as
-  # Mamba-CL (base lr 2e-4 × --lr_scale 50). The backbone lr (1e-3) is unchanged.
-  head_lr_scale: 10.0
+  # The head trains at lr × head_lr_scale = 2e-4 × 50 = 1e-2, as Mamba-CL (--lr_scale 50).
+  head_lr_scale: 50.0
 
   # Mixed precision, CUDA only: fp16 autocast + GradScaler (Mamba-CL --use_amp).
   use_amp: true

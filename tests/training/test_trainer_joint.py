@@ -297,9 +297,9 @@ def test_head_group_uses_scaled_learning_rate():
 
 
 def test_experiment_config_head_lr_matches_mamba_cl():
-    """Mamba-CL trains heads at 2e-4 x 50 = 1e-2; the backbone keeps lr 1e-3."""
+    """As the shared-head Mamba-CL baseline: backbone lr 2e-4, head 2e-4 x 50 = 1e-2."""
     t = load_config(EXPERIMENT_CONFIG).training
-    assert float(t.lr) == pytest.approx(1e-3)
+    assert float(t.lr) == pytest.approx(2e-4)
     assert float(t.lr) * float(t.head_lr_scale) == pytest.approx(1e-2)
 
 

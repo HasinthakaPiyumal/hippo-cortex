@@ -31,7 +31,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def backbone():
-    bb = MambaBackbone(checkpoint_path=CKPT).cuda().eval()
+    bb = MambaBackbone(checkpoint_path=CKPT, arch="defocus_base").cuda().eval()
     bb.set_task_head(5)
     return bb
 
@@ -59,7 +59,7 @@ def test_real_trainable_scope(backbone):
 
 
 def test_real_one_step_moves_only_trainable_parameters():
-    bb = MambaBackbone(checkpoint_path=CKPT).cuda().train()
+    bb = MambaBackbone(checkpoint_path=CKPT, arch="defocus_base").cuda().train()
     bb.set_task_head(5)
     before = {n: p.detach().clone() for n, p in bb.named_parameters()}
     opt = torch.optim.AdamW([p for p in bb.parameters() if p.requires_grad], lr=1e-2)

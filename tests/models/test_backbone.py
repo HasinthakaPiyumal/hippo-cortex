@@ -286,7 +286,7 @@ def test_build_loads_checkpoint_before_reload_params(tmp_path, fake_build):
     ckpt = tmp_path / "ckpt.pth"
     torch.save({"model": TinyDefocus(embed_dim=D).state_dict()}, ckpt)
 
-    bb = MambaBackbone(checkpoint_path=ckpt, image_size=IMG)
+    bb = MambaBackbone(checkpoint_path=ckpt, image_size=IMG, arch="defocus_base")
 
     assert fake_build.calls == ["load_state_dict", "reload_params"]
     assert bb.feature_dim == D
@@ -297,24 +297,24 @@ def test_build_fails_when_backbone_weights_are_missing(tmp_path, fake_build):
     ckpt = tmp_path / "ckpt.pth"
     torch.save({"model": state}, ckpt)
     with pytest.raises(RuntimeError, match="did not load"):
-        MambaBackbone(checkpoint_path=ckpt)
+        MambaBackbone(checkpoint_path=ckpt, arch="defocus_base")
 
 
 def test_build_accepts_a_bare_state_dict(tmp_path, fake_build):
     ckpt = tmp_path / "ckpt.pth"
     torch.save(TinyDefocus(embed_dim=D).state_dict(), ckpt)
-    MambaBackbone(checkpoint_path=ckpt)
+    MambaBackbone(checkpoint_path=ckpt, arch="defocus_base")
     assert fake_build.calls == ["load_state_dict", "reload_params"]
 
 
 def test_missing_checkpoint_error_names_the_download_url(tmp_path, fake_build):
     with pytest.raises(FileNotFoundError, match="defocus_mamba_base_cls.pth"):
-        MambaBackbone(checkpoint_path=tmp_path / "nope.pth")
+        MambaBackbone(checkpoint_path=tmp_path / "nope.pth", arch="defocus_base")
 
 
 def test_constructor_needs_a_checkpoint_or_a_model():
     with pytest.raises(ValueError, match="checkpoint_path"):
-        MambaBackbone()
+        MambaBackbone(arch="defocus_base")
 
 
 # ── baseline code is importable and configured as expected ───────────────────
@@ -339,7 +339,7 @@ def test_baseline_config_describes_defocus_mamba_base():
 )
 def test_real_model_without_cuda_kernels_gives_a_clear_error(tmp_path):
     with pytest.raises(RuntimeError, match="mamba-ssm"):
-        MambaBackbone(checkpoint_path=tmp_path / "unused.pth")
+        MambaBackbone(checkpoint_path=tmp_path / "unused.pth", arch="defocus_base")
 
 
 def test_freezing_a_head_clears_its_stale_gradients():
