@@ -60,6 +60,7 @@ def main(argv: list[str] | None = None) -> None:
         n_tasks=split_tasks,
         class_order=cfg.dataset.get("class_order", "random"),
         normalize=cfg.dataset.get("normalize", "cifar"),
+        augment=cfg.dataset.get("augment", True),  # inf_ssm also sets the eval transform
         num_workers=int(cfg.dataset.get("num_workers", 4)),
         pin_memory=bool(cfg.dataset.get("pin_memory", False)),
     )
@@ -113,7 +114,7 @@ def main(argv: list[str] | None = None) -> None:
         tracker.task_start(task_id)
         train_loader = get_task_loaders(
             task_id, "train", cfg.dataset.root, cfg.training.batch_size,
-            augment=bool(cfg.dataset.get("augment", True)), **data_kw,
+            **data_kw,
         )
         metrics = trainer.train_task(task_id, train_loader)
         tracker.task_end(task_id)

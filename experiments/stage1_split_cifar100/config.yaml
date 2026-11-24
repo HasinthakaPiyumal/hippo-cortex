@@ -31,8 +31,11 @@ dataset:
   num_workers: 4               # DataLoader worker threads; set to 0 on Windows
   pin_memory: true             # faster GPU transfer; set false if RAM is tight
 
-  # Augmentation (training split only)
-  augment: true                # random crop + horizontal flip — standard CIFAR
+  # Augmentation: cifar (= true) random crop + flip at 32x32, train only | none (= false) |
+  # inf_ssm: the Inf-SSM baselines' transforms (train: 224 RandAugment + colour jitter + random
+  # erasing, ImageNet stats; eval: resize 256 + centre crop 224, CIFAR stats). normalize is
+  # ignored with inf_ssm. Mixup / cutmix / label smoothing are not implemented.
+  augment: cifar
   image_size: 32               # native CIFAR-100 resolution
 
 # -----------------------------------------------------------------------------
