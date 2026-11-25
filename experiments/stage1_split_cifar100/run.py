@@ -15,6 +15,13 @@ Reads experiments/stage1_split_cifar100/config.yaml via OmegaConf; command-line
 Runs dataset.n_tasks sequential tasks (10 by default); fills acc_matrix (accuracy as
 set by eval.mode, class-incremental by default); logs metrics to wandb.
 
+Each task's W&B row holds "task", AA/AIA/FM so far, and acc/task_<j> for every task
+j seen so far — the full lower-triangular accuracy matrix spread across task rows,
+same shape as the Inf-SSM baselines' test/class_<i>_acc columns. This lets
+experiments/stage1_split_cifar100/eval_baseline.py reconstruct the matrix and compute
+BWT straight from the run (--wandb_run entity/hippocortex-stage1/<run_id> --method
+hippocortex), no local results file needed.
+
 After completing all tasks, saves:
   results/stage1_split_cifar100/acc_matrix.npy
   results/stage1_split_cifar100/summary.json    (AA, AIA, FM, memory_mb)
@@ -126,8 +133,6 @@ def main(argv: list[str] | None = None) -> None:
             "memory/swr_buffer_mb": mem_snap.swr_buffer_mb if mem_snap else 0.0,
         }
 
-        wandb_logger.log({"task": task_id, **metrics, **mem_log})
-
         # Evaluate on all tasks seen so far
         accs = {}
         for eval_id in range(task_id + 1):
@@ -138,10 +143,15 @@ def main(argv: list[str] | None = None) -> None:
             cl_metrics.record(task_id, eval_id, acc)
             accs[f"acc/task_{eval_id}"] = acc
 
+        # One log call per task, with "task" alongside acc/task_<j> for every j <= task_id:
+        # this is the same shape as the Inf-SSM baselines' per-task matrix columns
+        # (test/class_<i>_acc), so eval_baseline.py can reconstruct the full accuracy
+        # matrix — and BWT — straight from W&B history, no separate end-of-run dump needed.
         cl_so_far = cl_metrics.summary()
         wandb_logger.log({
-            **accs,
+            "task": task_id, **metrics, **mem_log, **accs,
             "AA": cl_so_far["final_aa"],
+            "AIA": cl_so_far["final_aia"],
             "FM": cl_so_far["final_fm"],
         })
 

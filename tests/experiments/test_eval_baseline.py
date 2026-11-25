@@ -265,6 +265,41 @@ class TestFetchWandbRun:
             result = fetch_wandb_run("entity/inf-ssm-baseline/abc", "inf_ssm")
         assert result["BWT"] is None
 
+    # --- hippocortex key mapping ---
+    def test_hippocortex_key_mapping(self):
+        rows = [
+            {"task": 0, "AA": 0.90, "AIA": 0.90, "FM": 0.0},
+            {"task": 1, "AA": 0.825, "AIA": 0.8625, "FM": 0.05},
+        ]
+        with self._patch_api(_make_wandb_run(rows)):
+            result = fetch_wandb_run("entity/hippocortex-stage1/abc", "hippocortex")
+        assert result["AA"] == pytest.approx(82.5)
+        assert result["AIA"] == pytest.approx(86.25)
+        assert result["FM"] == pytest.approx(5.0)
+        assert result["n_tasks"] == 2
+
+    # --- BWT from HippoCortex's run.py acc/task_<i> matrix ---
+    def test_bwt_reconstructed_from_acc_task_columns(self):
+        # Same hand-computed example as TestComputeBwt.test_three_task_example,
+        # but using HippoCortex's acc/task_<i> column naming instead of
+        # Inf-SSM's test/class_<i>_acc.
+        rows = [
+            {"task": 0, "AA": 0.90, "AIA": 0.90, "FM": 0.0, "acc/task_0": 0.90},
+            {"task": 1, "AA": 0.825, "AIA": 0.8625, "FM": 0.05,
+             "acc/task_0": 0.85, "acc/task_1": 0.80},
+            {"task": 2, "AA": 0.8267, "AIA": 0.85, "FM": 0.05,
+             "acc/task_0": 0.82, "acc/task_1": 0.78, "acc/task_2": 0.88},
+        ]
+        with self._patch_api(_make_wandb_run(rows)):
+            result = fetch_wandb_run("entity/hippocortex-stage1/abc", "hippocortex")
+        assert result["BWT"] == pytest.approx(-5.0)
+
+    def test_hippocortex_bwt_none_with_single_task(self):
+        rows = [{"task": 0, "AA": 0.90, "AIA": 0.90, "FM": 0.0, "acc/task_0": 0.90}]
+        with self._patch_api(_make_wandb_run(rows)):
+            result = fetch_wandb_run("entity/hippocortex-stage1/abc", "hippocortex")
+        assert result["BWT"] is None
+
 
 # ---------------------------------------------------------------------------
 # compute_bwt — pure function, hand-checkable
