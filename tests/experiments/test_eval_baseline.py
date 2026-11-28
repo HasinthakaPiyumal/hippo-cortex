@@ -30,7 +30,9 @@ spec.loader.exec_module(_mod)
 parse_log = _mod.parse_log
 extract_final_metrics_from_log = _mod.extract_final_metrics_from_log
 fetch_wandb_run = _mod.fetch_wandb_run
+compute_bwt = _mod.compute_bwt
 write_csv = _mod.write_csv
+write_main_table = _mod.write_main_table
 plot_acc_curves = _mod.plot_acc_curves
 
 _FIXTURE = Path(__file__).parent.parent / "fixtures" / "mamba_cl_fake_3task.log"
@@ -217,6 +219,94 @@ class TestFetchWandbRun:
             with pytest.raises(ValueError, match="No per-task rows"):
                 fetch_wandb_run("entity/inf-ssm-baseline/abc", "inf_ssm")
 
+    # --- TIL mapping ---
+    def test_til_mapped_and_scaled(self):
+        rows = [
+            {"task": 0, "AA": 0.90, "AIA": 0.90, "FM": 0.0, "TIL_AA": 0.95},
+            {"task": 1, "AA": 0.825, "AIA": 0.8625, "FM": 0.05, "TIL_AA": 0.92},
+        ]
+        with self._patch_api(_make_wandb_run(rows)):
+            result = fetch_wandb_run("entity/inf-ssm-baseline/abc", "inf_ssm")
+        assert result["TIL"] == pytest.approx(92.0)
+
+    def test_til_none_when_not_logged(self):
+        rows = [{"task": 1, "class_inc_last_acc": 85.0, "class_inc_last_forg": 0.0}]
+        with self._patch_api(_make_wandb_run(rows)):
+            result = fetch_wandb_run("entity/mamba-cl-baseline/abc", "mamba_cl")
+        assert result["TIL"] is None
+
+    # --- BWT from the inf-ssm-protocol test/class_<i>_acc matrix ---
+    def test_bwt_reconstructed_from_class_acc_columns(self):
+        # Matches the hand-computed example in TestComputeBwt.
+        rows = [
+            {"task": 0, "AA": 0.90, "AIA": 0.90, "FM": 0.0, "test/class_0_acc": 0.90},
+            {"task": 1, "AA": 0.825, "AIA": 0.8625, "FM": 0.05,
+             "test/class_0_acc": 0.85, "test/class_1_acc": 0.80},
+            {"task": 2, "AA": 0.8267, "AIA": 0.85, "FM": 0.05,
+             "test/class_0_acc": 0.82, "test/class_1_acc": 0.78, "test/class_2_acc": 0.88},
+        ]
+        with self._patch_api(_make_wandb_run(rows)):
+            result = fetch_wandb_run("entity/inf-ssm-baseline/abc", "inf_ssm")
+        assert result["BWT"] == pytest.approx(-5.0)
+
+    def test_bwt_none_when_matrix_not_logged(self):
+        # Mamba-CL's own protocol never logs test/class_<i>_acc.
+        rows = [
+            {"task": 1, "class_inc_last_acc": 85.0, "class_inc_last_forg": 0.0},
+            {"task": 2, "class_inc_last_acc": 90.16, "class_inc_last_forg": 2.18},
+        ]
+        with self._patch_api(_make_wandb_run(rows)):
+            result = fetch_wandb_run("entity/mamba-cl-baseline/abc", "mamba_cl")
+        assert result["BWT"] is None
+
+    def test_bwt_none_with_single_task(self):
+        rows = [{"task": 0, "AA": 0.90, "AIA": 0.90, "FM": 0.0, "test/class_0_acc": 0.90}]
+        with self._patch_api(_make_wandb_run(rows)):
+            result = fetch_wandb_run("entity/inf-ssm-baseline/abc", "inf_ssm")
+        assert result["BWT"] is None
+
+
+# ---------------------------------------------------------------------------
+# compute_bwt — pure function, hand-checkable
+# ---------------------------------------------------------------------------
+class TestComputeBwt:
+    def test_three_task_example(self):
+        # M[0] = [0.90]
+        # M[1] = [0.85, 0.80]
+        # M[2] = [0.82, 0.78, 0.88]
+        # BWT = mean_{i=0,1}(M[2][i] - M[i][i])
+        #     = ((0.82-0.90) + (0.78-0.80)) / 2 = -0.05 -> -5.0 pp
+        class_accs = {
+            0: {0: 0.90},
+            1: {0: 0.85, 1: 0.80},
+            2: {0: 0.82, 1: 0.78, 2: 0.88},
+        }
+        assert compute_bwt(class_accs) == pytest.approx(-5.0)
+
+    def test_positive_backward_transfer(self):
+        # Task 0 improves after later training: BWT > 0.
+        class_accs = {
+            0: {0: 0.70},
+            1: {0: 0.80, 1: 0.75},
+        }
+        assert compute_bwt(class_accs) == pytest.approx(10.0)
+
+    def test_single_task_returns_none(self):
+        assert compute_bwt({0: {0: 0.90}}) is None
+
+    def test_empty_returns_none(self):
+        assert compute_bwt({}) is None
+
+    def test_missing_diagonal_entry_is_skipped(self):
+        # Task 1's own diagonal (class_1_acc at t=1) was never logged.
+        class_accs = {
+            0: {0: 0.90},
+            1: {0: 0.85},  # no key 1 here
+            2: {0: 0.82, 1: 0.78, 2: 0.88},
+        }
+        # Only task 0 contributes: (0.82 - 0.90) = -0.08 -> -8.0 pp
+        assert compute_bwt(class_accs) == pytest.approx(-8.0)
+
 
 # ---------------------------------------------------------------------------
 # write_csv
@@ -295,3 +385,49 @@ class TestPlotAccCurves:
 
     def test_empty_records_does_not_crash(self, tmp_path):
         plot_acc_curves([("mamba_cl", [])], tmp_path / "empty.png")
+
+
+# ---------------------------------------------------------------------------
+# write_main_table
+# ---------------------------------------------------------------------------
+class TestWriteMainTable:
+    def _rows(self):
+        return [
+            {"method": "inf_ssm", "AA": "28.42", "AIA": "55.35", "FM": "24.83",
+             "TIL": "70.99", "BWT": "-5.00",
+             "wandb_run": "hasinthakapiyumal-uok/inf-ssm-baseline/d591d88c21e6",
+             "eval_date": "2026-11-22"},
+            {"method": "mamba_cl_shared_head", "AA": "51.52", "AIA": "59.43", "FM": "48.62",
+             "TIL": "94.94", "BWT": "",
+             "wandb_run": "hasinthakapiyumal-uok/mamba-cl-baseline/3388e092e0b1",
+             "eval_date": "2026-11-22"},
+        ]
+
+    def test_writes_csv_with_all_columns(self, tmp_path):
+        write_main_table(self._rows(), tmp_path)
+        with open(tmp_path / "main_table.csv", newline="") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+            for key in ("method", "AA", "AIA", "FM", "TIL", "BWT", "wandb_run", "eval_date"):
+                assert key in reader.fieldnames
+        assert len(rows) == 2
+        assert rows[0]["AA"] == "28.42"
+
+    def test_writes_markdown_table(self, tmp_path):
+        write_main_table(self._rows(), tmp_path)
+        text = (tmp_path / "main_table.md").read_text()
+        assert "inf_ssm" in text
+        assert "28.42" in text
+        assert "mamba_cl_shared_head" in text
+        assert "d591d88c21e6" in text
+
+    def test_markdown_includes_protocol_footnote(self, tmp_path):
+        write_main_table(self._rows(), tmp_path)
+        text = (tmp_path / "main_table.md").read_text()
+        assert "null-space" in text.lower()
+
+    def test_creates_parent_directory(self, tmp_path):
+        nested = tmp_path / "sub" / "dir"
+        write_main_table(self._rows(), nested)
+        assert (nested / "main_table.csv").exists()
+        assert (nested / "main_table.md").exists()
