@@ -28,13 +28,14 @@ Output CSV columns:
 Main comparison table (Paper 1):
     python experiments/stage1_split_cifar100/eval_baseline.py --table \\
         --wandb_run hasinthakapiyumal-uok/inf-ssm-baseline/d591d88c21e6 --method inf_ssm \\
-        --wandb_run hasinthakapiyumal-uok/mamba-cl-baseline/3388e092e0b1 --method mamba_cl_shared_head
+        --wandb_run hasinthakapiyumal-uok/mamba-cl-baseline/3388e092e0b1 --method mamba_cl_shared_head \\
+        --wandb_run hasinthakapiyumal-uok/hippocortex-stage1/<run_id> --method hippocortex
 Writes results/stage1_split_cifar100/main_table.md and .csv with
 AA, AIA, FM, TIL and BWT for each method, plus acc_curve.png.
-Add HippoCortex with one more --wandb_run/--method pair; no code change needed.
 
-NOTE on BWT: only available when the run logs the per-task accuracy matrix as
-`test/class_<i>_acc` columns (inf-ssm-protocol runs: seq, inf_ssm, mamba_cl_shared_head).
+NOTE on BWT: only available when the run logs the per-task accuracy matrix —
+`test/class_<i>_acc` columns (Inf-SSM-protocol baseline runs: seq, inf_ssm,
+mamba_cl_shared_head) or `acc/task_<i>` columns (HippoCortex's run.py).
 Mamba-CL's own protocol does not log this matrix to W&B, so BWT is None for --method mamba_cl.
 """
 from __future__ import annotations
@@ -70,6 +71,12 @@ _WANDB_KEY_MAP: Dict[str, Dict[str, str]] = {
         "FM": "FM",
         "TIL_AA": "TIL",
     },
+    "hippocortex": {
+        "task": "task",
+        "AA": "AA",
+        "AIA": "AIA",
+        "FM": "FM",
+    },
 }
 
 # Fallback for unknown methods — try these common key names
@@ -83,9 +90,13 @@ _WANDB_FALLBACK_KEYS = {
     "class_inc_last_forg": "FM",
 }
 
-# Per-task accuracy matrix, logged only by inf-ssm-protocol runs (seq, inf_ssm,
-# mamba_cl_shared_head): row at task t holds test/class_<i>_acc for i in 0..t.
-_CLASS_ACC_RE = re.compile(r"^test/class_(\d+)_acc$")
+# Per-task accuracy matrix, logged by inf-ssm-protocol runs (seq, inf_ssm,
+# mamba_cl_shared_head) as test/class_<i>_acc, and by HippoCortex's run.py as
+# acc/task_<i>: row at task t holds one of these for i in 0..t.
+_MATRIX_KEY_PATTERNS = [
+    re.compile(r"^test/class_(\d+)_acc$"),
+    re.compile(r"^acc/task_(\d+)$"),
+]
 
 # ---------------------------------------------------------------------------
 # Log-file parser (kept as fallback)
@@ -178,12 +189,16 @@ def fetch_wandb_run(run_path: str, method: str) -> Dict[str, object]:
         if "AA" in mapped:
             rows_by_task[task_id] = mapped  # last row for this task wins
 
-        # Per-task accuracy matrix, if this run logs it (inf-ssm-protocol runs).
+        # Per-task accuracy matrix, if this run logs it.
         class_row = {}
         for k, v in row.items():
-            m = _CLASS_ACC_RE.match(k)
-            if m is not None and v is not None:
-                class_row[int(m.group(1))] = float(v)
+            if v is None:
+                continue
+            for pattern in _MATRIX_KEY_PATTERNS:
+                m = pattern.match(k)
+                if m is not None:
+                    class_row[int(m.group(1))] = float(v)
+                    break
         if class_row:
             class_accs_by_task[task_id] = class_row  # last row wins, same as above
 
